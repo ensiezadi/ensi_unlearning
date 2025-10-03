@@ -67,8 +67,8 @@ class PLTNetMini(DatasetBase):
     def _read_data(self):
         """Read and split dataset"""
         # Use hardcoded paths
-        labels_csv_path = r"C:\Users\CY\.openml\org\openml\www\datasets\44293\PLT_NET_Mini\labels.csv"
-        images_dir = r"C:\Users\CY\.openml\org\openml\www\datasets\44293\PLT_NET_Mini\images"
+        labels_csv_path = r"E:\Others\DATASETS\plant_net_mini\labels.csv"
+        images_dir = r"E:\Others\DATASETS\plant_net_mini\images"
         
         if not os.path.exists(labels_csv_path):
             raise FileNotFoundError(f"Labels file not found at {labels_csv_path}")

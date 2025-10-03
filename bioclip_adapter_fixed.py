@@ -5,6 +5,8 @@ import torch
 import torch.nn.functional as F
 from typing import List, Union
 import numpy as np
+from colorama import Fore, Style, init
+init(autoreset=True)
 
 class BioCLIPAdapter:
     """Adapter class to make BioCLIP compatible with CLIP interface"""
@@ -34,19 +36,30 @@ class BioCLIPAdapter:
                 # Create a dummy conv1 attribute
                 self.visual.conv1 = type('DummyConv1', (), {'weight': torch.nn.Parameter(torch.randn(1, 3, 1, 1).to(device))})()
 
-        # Add transformer attribute for text encoder compatibility
+        # --- FIX: More robust search for the text encoder attribute ---
         if hasattr(self.model, 'text'):
             self.transformer = self.model.text
+        elif hasattr(self.model, 'transformer'): # A common name
+            self.transformer = self.model.transformer
+        elif hasattr(self.model, 'text_model'): # Another common name
+            self.transformer = self.model.text_model
         elif hasattr(self.model, 'text_encoder'):
             self.transformer = self.model.text_encoder
         else:
-            # Create minimal transformer structure
-            self.transformer = type('Transformer', (), {
-                'width': self.model.text_projection.shape[0] if hasattr(self.model, 'text_projection') else 512
-            })()
+            # Provide a more helpful error message for debugging
+            available_attrs = "\n".join([f" - {attr}" for attr in dir(self.model) if not attr.startswith('_')])
+            raise ValueError(
+                "BioCLIP model does not have a recognizable text encoder attribute "
+                "(checked for 'text', 'transformer', 'text_model', 'text_encoder').\n"
+                f"Available attributes on the loaded model are:\n{available_attrs}"
+            )
 
     def encode_text(self, text_tokens):
         """Encode text tokens using BioCLIP"""
+        return self.model.encode_text(text_tokens)
+    
+    def encode_text_no_grad(self, text_tokens):
+        """Encode text tokens using BioCLIP without gradients"""
         with torch.no_grad():
             return self.model.encode_text(text_tokens)
 
@@ -135,16 +148,7 @@ def create_bioclip_model(arch="ViT-B-16", device='cuda', load_path=""):
     try:
         # Try to load actual BioCLIP model
         import open_clip
-        
-        # Convert CLIP architecture names to BioCLIP compatible names
-        arch_mapping = {
-            "ViT-B/16": "ViT-B-16",
-            "ViT-B-16": "ViT-B-16", 
-            "RN50": "RN50"
-        }
-        
-        bioclip_arch = arch_mapping.get(arch, arch)
-        model_name = f'hf-hub:imageomics/bioclip'
+        model_name='hf-hub:imageomics/bioclip'
         
         print(f"Loading BioCLIP model: {model_name}")
         
@@ -160,8 +164,8 @@ def create_bioclip_model(arch="ViT-B-16", device='cuda', load_path=""):
             except Exception as e:
                 print(f"Warning: Could not load state dict for BioCLIP: {e}")
                 print("Continuing with pretrained BioCLIP weights...")
-        
-        print("Successfully loaded BioCLIP model!")
+
+        print(Fore.GREEN + "Successfully loaded BioCLIP model!")
         return adapter
         
     except Exception as e:
@@ -197,7 +201,7 @@ def bioclip_tokenize(texts: Union[str, List[str]], context_length: int = 77):
             texts = [texts]
         
         # Use open_clip's tokenize function with proper context length
-        tokens = open_clip.tokenize(texts, context_length=77)
+        tokens = tokenizer(texts, context_length=context_length)
         return tokens
     except Exception as e:
         print(f"BioCLIP tokenizer failed: {e}, falling back to CLIP tokenizer")
@@ -220,7 +224,8 @@ def clip_classifier(classnames, templates, model):
 
         for classname in classnames:
             # Tokenize all templates for this class
-            classname = classname.replace('_', ' ')
+            # 确保classname是字符串
+            classname = str(classname).replace('_', ' ')
 
             # Safe template formatting with error handling
             texts = []

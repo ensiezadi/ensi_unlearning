@@ -6,3 +6,4 @@ pandas==1.5.1
 open_clip_torch
 transformers
 huggingface_hub
+-e git+https://github.com/KaiyangZhou/Dassl.pytorch.git#egg=dassl

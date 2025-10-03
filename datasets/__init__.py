@@ -1,0 +1,1 @@
+from .bird525 import Bird525

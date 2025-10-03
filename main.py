@@ -1,5 +1,5 @@
 import os
-# import torch.optim as optim 
+import sys
 import numpy as np
 import json
 import random
@@ -7,41 +7,58 @@ from tqdm import tqdm
 import torch
 import pickle
 import argparse
+from collections import OrderedDict
+from colorama import Fore, Style, init
+from torch.optim.lr_scheduler import CosineAnnealingLR
 
-import datasets.stanford_cars
-import datasets.stanford_dogs
-import datasets.caltech101
-import datasets.oxford_flowers
-import datasets.oxford_pets
-import datasets.food101
-import datasets.pinsfaces
-import datasets.plt_net_mini
+def convert_to_json_serializable(obj):
+    """将numpy数组和torch张量转换为JSON可序列化的格式"""
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, torch.Tensor):
+        return obj.cpu().numpy().tolist()
+    elif isinstance(obj, (np.float32, np.float64, np.int32, np.int64)):
+        return float(obj) if isinstance(obj, (np.float32, np.float64)) else int(obj)
+    elif isinstance(obj, dict):
+        return {key: convert_to_json_serializable(value) for key, value in obj.items()}
+    elif isinstance(obj, (list, tuple)):
+        return [convert_to_json_serializable(item) for item in obj]
+    else:
+        # 尝试转换其他numpy标量类型
+        if hasattr(obj, 'item'):  # numpy标量类型
+            return obj.item()
+        return obj
 
-from dassl.data.datasets.build import DATASET_REGISTRY, build_dataset
+# 添加Dassl.pytorch到Python路径
+current_dir = os.path.dirname(os.path.abspath(__file__))
+dassl_path = os.path.join(current_dir, 'Dassl.pytorch')
+if dassl_path not in sys.path:
+    sys.path.insert(0, dassl_path)
+
+# --- Imports from utils_bioclip ---
+from sklearn.metrics import confusion_matrix
+import pandas as pd
+from torchvision.transforms import Normalize
+
+init(autoreset=True)
+
+# --- Project-specific Imports ---
+from dassl.data.datasets.build import build_dataset
 from dassl.data.transforms.transforms import build_transform
 from dassl.data.data_manager import build_data_loader
-
-from torch.utils.data import DataLoader, Dataset
 from dassl.config import get_cfg_default
 
-# Replace CLIP imports with BioCLIP
-from bioclip_adapter_fixed import BioCLIPAdapter, bioclip_tokenize, create_bioclip_model
-
-# # Keep clip import for backward compatibility, but we'll use BioCLIP
-# from clip import clip
-
-from utils_bioclip import *
-import utils_bioclip as utils
-
-from utils_lora import *
-from collections import OrderedDict
-
+from bioclip_adapter_fixed import bioclip_tokenize, create_bioclip_model, BioCLIPAdapter, clip_classifier
+from utils_lora import Linear
 from gen_classes import *
 from forget_cls import *
 
-torch.set_num_threads(10)
+# 导入自定义数据集
+import datasets
 
-device = 'cuda'
+# --- Global Configurations ---
+torch.set_num_threads(10)
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
 IGNORE_OTHER_DS = False
 PRINT_EVERY = 200
 EPOCHS = 2000
@@ -49,456 +66,739 @@ REDUCTION_THR = 0.7
 UNLEARN_TRIALS = 100
 
 CUSTOM_TEMPLATES = {
-        "OxfordFlowers": "a photo of a {}, a type of flower.",
-        "StanfordCars": "a photo of a {}.",
-        "Caltech101": "a photo of a {}.",
-        "StanfordDogs": "a photo of a {}.",
-        "PLTNetMini": "a photo of {}, a type of plant.",
+    "OxfordFlowers": "a photo of a {}, a type of flower.",
+    "StanfordCars": "a photo of a {}, a type of car.",
+    "Caltech101": "a photo of a {}, an object.",
+    "StanfordDogs": "a photo of a {}, a breed of dog.",
+    "PLTNetMini": "a photo of a {}, a type of plant.",
+    "Bird525": "a photo of a {}, a type of bird.",
+}
+
+
+# =================================================================================
+# --- Utility Functions ---
+# =================================================================================
+
+def load_results(backbone):
+    filename = "results_zs_all_RN50.pkl" if backbone == "RN50" else "results_zs_all_ViT16.pkl"
+    pickle_path = os.path.join("zs_results", filename)
+    if os.path.exists(pickle_path):
+        with open(pickle_path, "rb") as f:
+            return pickle.load(f)
+    else:
+        print(f"Warning: Pickle file not found at {pickle_path}. Returning empty dictionary.")
+        return {}
+
+def get_configs(args):
+    onecls_configs = {
+        'RN50':{
+            'StanfordCars': {'lamb_preserve': 0.4, 'lamb_forget': 1.3, 'lora_r': 5, 'lamb_weight': 1.},
+            'StanfordDogs': {'lamb_preserve': 0.4, 'lamb_forget': 1.3, 'lora_r': 5, 'lamb_weight': 1.},
+            'Caltech101': {'lamb_preserve': 0.4, 'lamb_forget': 1.3, 'lora_r': 5, 'lamb_weight': 1.},
+            'OxfordFlowers': {'lamb_preserve': 0.4, 'lamb_forget': 1.3, 'lora_r': 5, 'lamb_weight': 1.},
+            'PLTNetMini': {'lamb_preserve': 0.4, 'lamb_forget': 1.3, 'lora_r': 5, 'lamb_weight': 1.},
+            'Bird525': {'lamb_preserve': 0.4, 'lamb_forget': 1.3, 'lora_r': 5, 'lamb_weight': 1.},
+        },
+        'ViT-B/16': {
+            'StanfordCars': {'lamb_preserve': 0.25, 'lamb_forget': 1.3, 'lora_r': 5, 'lamb_weight': 1.},
+            'StanfordDogs': {'lamb_preserve': 0.3, 'lamb_forget': 1.3, 'lora_r': 5, 'lamb_weight': 1.},
+            'Caltech101': {'lamb_preserve': 0.3, 'lamb_forget': 1.1, 'lora_r': 5, 'lamb_weight': 1.},
+            'OxfordFlowers': {'lamb_preserve': 0.3, 'lamb_forget': 1.1, 'lora_r': 5, 'lamb_weight': 1.},
+            'PLTNetMini': {'lamb_preserve': 0.3, 'lamb_forget': 1.1, 'lora_r': 5, 'lamb_weight': 1.},
+            'Bird525': {'lamb_preserve': 0.0, 'lamb_forget': 1.1, 'lora_r': 5, 'lamb_weight': 0.}
         }
+    }
+    multiclass_configs = {
+        'RN50': {
+            'StanfordCars': {'lamb_preserve': 0.3, 'lamb_forget': 1.1, 'lora_r': 5, 'lamb_weight': 1.},
+            'StanfordDogs': {'lamb_preserve': 0.3, 'lamb_forget': 1.1, 'lora_r': 5, 'lamb_weight': 1.},
+            'Caltech101': {'lamb_preserve': 0.3, 'lamb_forget': 1.1, 'lora_r': 5, 'lamb_weight': 1.},
+            'OxfordFlowers': {'lamb_preserve': 0.3, 'lamb_forget': 1.1, 'lora_r': 5, 'lamb_weight': 1.},
+            'PLTNetMini': {'lamb_preserve': 0.3, 'lamb_forget': 1.1, 'lora_r': 5, 'lamb_weight': 1.},
+            'Bird525': {'lamb_preserve': 0.3, 'lamb_forget': 1.1, 'lora_r': 5, 'lamb_weight': 1.},
+        },
+        'ViT-B/16': {
+            'StanfordCars': {'lamb_preserve': 0.35, 'lamb_forget': 1.1, 'lora_r': 5, 'lamb_weight': 1.},
+            'StanfordDogs': {'lamb_preserve': 0.35, 'lamb_forget': 1.0, 'lora_r': 5, 'lamb_weight': 1.},
+            'Caltech101': {'lamb_preserve': 0.3, 'lamb_forget': 1.1, 'lora_r': 5, 'lamb_weight': 1.},
+            'OxfordFlowers': {'lamb_preserve': 0.25, 'lamb_forget': 1.1, 'lora_r': 5, 'lamb_weight': 1.},
+            'PLTNetMini': {'lamb_preserve': 0.25, 'lamb_forget': 1.1, 'lora_r': 8, 'lamb_weight': 1.},
+            'Bird525': {'lamb_preserve': 0.25, 'lamb_forget': 1.1, 'lora_r': 5, 'lamb_weight': 1.},
+        }
+    }
+    if args.multiclass_forget:
+        print(f"SETTING {args.backbone_arch} MULTICLASS")
+        configs = multiclass_configs[args.backbone_arch]
+    else:
+        print(f"SETTING {args.backbone_arch} ONE CLASS")
+        configs = onecls_configs[args.backbone_arch]
+    return configs
+
+def get_model(arch="ViT-B/16", device='cpu', load_path=""):
+    print("Loading model...")
+    model = create_bioclip_model(arch=arch, device=device)
+    return model
+
+def cls_acc(output, target, topk=1):
+    pred = np.argmax(output, axis=1)
+    correct = pred == target
+    acc = 100 * correct.sum() / target.shape[0]
+    return acc
+
+@torch.no_grad()
+def calculate_average_class_similarity(model, loader, classnames, template, device):
+    """
+    Computes the average similarity between images of each class and their corresponding text description.
+    """
+    model.eval()
+    
+    all_image_features = []
+    all_labels = []
+    for batch in tqdm(loader, desc="Calculating similarities"):
+        images = batch['img'].to(device)
+        labels = batch['label'].to(device)
         
+        image_features = model.encode_image(images.to(next(model.parameters()).dtype))
+        image_features /= image_features.norm(dim=-1, keepdim=True)
+        
+        all_image_features.append(image_features)
+        all_labels.append(labels)
+        
+    all_image_features = torch.cat(all_image_features)
+    all_labels = torch.cat(all_labels)
+    
+    text_features = clip_classifier(classnames, [template], model).to(device)
+    
+    if text_features.shape[0] != len(classnames):
+        print(Fore.YELLOW + "Transposing text features to match expected shape (num_classes, feature_dim)...")
+        text_features = text_features.T
+        
+    text_features /= text_features.norm(dim=-1, keepdim=True)
+    
+    avg_similarities = {}
+    for i, classname in enumerate(classnames):
+        class_mask = (all_labels == i)
+        if class_mask.sum() == 0:
+            continue
+            
+        class_image_features = all_image_features[class_mask]
+        
+        similarity_scores = class_image_features @ text_features[i]
+        
+        avg_similarities[classname] = similarity_scores.mean().item()
+        
+    return avg_similarities
+
+def evaluate_clip_zs(model, loader, clip_weights, device=None, out_conf=False, output_probs=False):
+    model.eval()
+    features, labels = [], []
+    with torch.no_grad():
+        for i, batch in enumerate(tqdm(loader, desc="Evaluating")):
+            images, target = batch['img'].to(device), batch['label'].to(device)
+            image_features = model.encode_image(images.to(next(model.parameters()).dtype))
+            image_features /= image_features.norm(dim=-1, keepdim=True)
+            features.append(image_features.cpu())
+            labels.append(target.cpu())
+
+    labels, features = torch.cat(labels).numpy(), torch.cat(features)
+    clip_weights_tensor = clip_weights.detach().cpu()
+    if clip_weights_tensor.shape[0] != features.shape[1]:
+        clip_weights_tensor = clip_weights_tensor.T
+    
+    features_float, clip_weights_float = features.float(), clip_weights_tensor.float()
+    raw_similarity_tensor = features_float @ clip_weights_float
+    scaled_logits_tensor = 100. * raw_similarity_tensor
+    clip_logits_test = scaled_logits_tensor.numpy()
+    
+    acc = cls_acc(clip_logits_test, labels) / 100.
+
+    if out_conf:
+        raw_similarity = raw_similarity_tensor.numpy()
+        return acc, (labels, clip_logits_test, raw_similarity)
+    return acc
+
+def eval_all_ds(model, datasets_cls, forget_ds, forget_lbl, all_loaders, train_loader=None, eval_forgetonly=False, debug=False, device='cpu', ignore_labels_main=[]):
+    results = {ds: {} for ds in all_loaders}
+    for ds, test_loader in all_loaders.items():
+        if ds not in datasets_cls: continue
+        model.eval()
+        classnames = datasets_cls[ds].classnames
+        template = [CUSTOM_TEMPLATES.get(ds, 'a photo of a {}.')]
+        clip_weights = clip_classifier(classnames, [template], model).to(device)
+
+        if ds == forget_ds:
+            if debug:
+                acc, details = evaluate_clip_zs(model, test_loader, clip_weights, device=device, out_conf=True)
+                labels, clip_logits_test, raw_similarities = details
+                
+                if ignore_labels_main:
+                    ignore_ids = [classnames.index(c) for c in ignore_labels_main if c in classnames]
+                    mask = ~np.isin(labels, ignore_ids)
+                else:
+                    forget_id = classnames.index(forget_lbl) if forget_lbl in classnames else -1
+                    mask = labels != forget_id
+                
+                cm = confusion_matrix(labels, clip_logits_test.argmax(1))
+                if not ignore_labels_main and forget_lbl in classnames:
+                    forget_id = classnames.index(forget_lbl)
+                    cls_acc_test = cm[forget_id, forget_id] / (cm[forget_id, :].sum() + 1e-8)
+                else:
+                    cls_acc_test = -1
+
+                # 计算保留类别的准确率 - 需要从混淆矩阵中排除忘记类别
+                if ignore_labels_main:
+                    ignore_ids = [classnames.index(c) for c in ignore_labels_main if c in classnames]
+                    preserved_class_ids = [i for i in range(len(classnames)) if i not in ignore_ids]
+                else:
+                    forget_id = classnames.index(forget_lbl) if forget_lbl in classnames else -1
+                    preserved_class_ids = [i for i in range(len(classnames)) if i != forget_id]
+                
+                if preserved_class_ids:
+                    preserved_cm = cm[np.ix_(preserved_class_ids, preserved_class_ids)]
+                    no_cls_acc = np.diag(preserved_cm).sum() / (preserved_cm.sum() + 1e-8)
+                else:
+                    no_cls_acc = -1
+
+                key = '|'.join(ignore_labels_main) if ignore_labels_main else forget_lbl
+                
+                results[ds][key] = {
+                    'cls_acc_test' : cls_acc_test, 
+                    'no_cls_acc' : no_cls_acc,
+                    'raw_similarities': raw_similarities
+                }
+                print(f"{10*'+++'} Main DS: {ds} | Results: {{'cls_acc_test': {cls_acc_test:.4f}, 'no_cls_acc': {no_cls_acc:.4f}}} {10*'+++'}")
+        
+        elif not eval_forgetonly:
+            acc = evaluate_clip_zs(model, test_loader, clip_weights, device=device)
+            results[ds]['all'] = {'all_ds' : acc}
+            print(f"{10*'+++'} Other DS: {ds} | Accuracy: {acc:.4f} {10*'+++'}")
+
+    return results
+
+# =================================================================================
+# --- Main Script Helper Functions ---
+# =================================================================================
+
 def set_seeds(seed):
     torch.manual_seed(seed)
     random.seed(seed)
     np.random.seed(seed)
 
-
 def initialize_config(args):
     cfg = get_cfg_default()
-    cfg.merge_from_file(args.config_file)
+    if os.path.exists(args.config_file):
+        cfg.merge_from_file(args.config_file)
+    else:
+        print(f"Warning: Config file not found at {args.config_file}. Using default settings.")
+    
     cfg.DATASET.SUBSAMPLE_CLASSES = "all"
     cfg.SEED = args.seed
-    cfg.DATASET.ROOT = "E:\Others\ensi_unlearning\datasets"
-    cfg.DATALOADER.NUM_WORKERS = 0
+    cfg.DATASET.ROOT = args.dataset_root
+    cfg.DATALOADER.NUM_WORKERS = 2
     cfg.DATASET.NUM_SHOTS = -1
     cfg.DATALOADER.TRAIN_X.BATCH_SIZE = 4
     cfg.DATALOADER.TEST.BATCH_SIZE = 128
     return cfg
 
+def load_test_datasets(cfg, model):
+    import datasets.stanford_cars
+    import datasets.stanford_dogs
+    import datasets.caltech101
+    import datasets.oxford_flowers
+    import datasets.oxford_pets
+    import datasets.food101
+    # import datasets.pinsfaces
+    import datasets.plt_net_mini
+    import datasets.bird525
 
-def load_test_datasets(cfg):
     test_datasets, test_dataloaders, datasets_cls = {}, {}, {}
     for ds in all_ds:
         cfg.DATASET.NAME = ds
-        tfm_train = build_transform(cfg, is_train=True)
-        tfm_test = build_transform(cfg, is_train=False)
-        dataset = build_dataset(cfg)
+
+        if isinstance(model, BioCLIPAdapter):
+            print(Fore.CYAN + f"Using BioCLIP's specific preprocessing for {ds}...")
+            tfm_test = model.preprocess
+        
+        try:
+            dataset = build_dataset(cfg)
+        except Exception as e:
+            print(Fore.RED + f"Error building dataset '{ds}': {e}. Skipping.")
+            continue
 
         test_loader = build_data_loader(
-                    cfg,
-                    sampler_type=cfg.DATALOADER.TEST.SAMPLER,
-                    data_source=dataset.test,
-                    batch_size=cfg.DATALOADER.TEST.BATCH_SIZE,
-                    tfm=tfm_test,
-                    is_train=False,
-                    dataset_wrapper=None
+            cfg, sampler_type='SequentialSampler', data_source=dataset.test,
+            batch_size=cfg.DATALOADER.TEST.BATCH_SIZE, tfm=tfm_test, is_train=False,
+            dataset_wrapper=None
         )
-
         test_datasets[ds] = dataset
         test_dataloaders[ds] = test_loader
         datasets_cls[ds] = dataset
-
     return test_datasets, test_dataloaders, datasets_cls
-
-    
-def get_activation_proj(name):
-    def hook(model, input, output):
-        if 'ln_final' in name or 'text_projection' in name or 'transformer' in name:
-            # Handle different output formats
-            if isinstance(output, tuple):
-                output = output[0]
-            elif isinstance(output, list):
-                output = output[0]
-
-            # Store the hook data
-            if isinstance(input, tuple) and len(input) > 0:
-                hooks[name] = (input[0].detach(), output.detach())
-            else:
-                hooks[name] = (None, output.detach())
-    return hook
-
-hooks = {}
-
-@torch.no_grad()
-def precompute_projections(model, classes, template=['{}']):
-    list_hooks = []
-    projections = []
-    global hooks
-    
-    # Get model device safely
-    if hasattr(model, 'device'):
-        model_device = model.device
-    elif hasattr(model, 'visual') and hasattr(model.visual, 'conv1'):
-        model_device = model.visual.conv1.weight.device
-    else:
-        model_device = next(model.parameters()).device
-
-    for classname in classes:
-        hooks = {}
-        classname = classname.replace('_', ' ')
-        texts = [t.format(classname) for t in template]
-
-        try:
-            # Reset CUDA context if there are previous errors
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-
-            texts = bioclip_tokenize(texts)
-            # Move to device safely
-            texts = texts.to(model_device)
-            class_embeddings = model.encode_text(texts)
-            projections.append(class_embeddings)
-
-            # Try to get hooks, but handle if they don't exist
-            hook_keys = [k for k in hooks.keys() if 'ln_final' in k or 'text_projection' in k or 'transformer' in k]
-            if hook_keys:
-                hook_data = hooks[hook_keys[0]][1]
-                # Safer indexing - use mean instead of argmax to avoid CUDA errors
-                if len(hook_data.shape) > 1:
-                    list_hooks.append(hook_data.mean(0).clone())
-                else:
-                    list_hooks.append(hook_data.clone())
-            else:
-                # Fallback: use the class embeddings directly
-                list_hooks.append(class_embeddings.mean(0).clone())
-
-        except Exception as e:
-            print(f"Error in precompute_projections for class {classname}: {e}")
-            print(f"This suggests BioCLIP vocabulary incompatibility. Switching to CLIP fallback mode.")
-
-            # # Force switch to CLIP mode for remaining classes
-            # try:
-            #     # Clear CUDA cache to avoid error propagation
-            #     if torch.cuda.is_available():
-            #         torch.cuda.empty_cache()
-
-            #     # Use CLIP directly for this class
-            #     import clip
-            #     clip_texts = clip.tokenize([template[0].format(classname) for template in [template]]).to(model_device)
-
-            #     # Check if model is actually a CLIP model or BioCLIP adapter
-            #     if hasattr(model, 'model'):  # BioCLIP adapter
-            #         # Fall back to creating a dummy embedding on CPU first
-            #         dummy_embedding = torch.randn(512, dtype=torch.float32)
-            #         dummy_embedding = dummy_embedding.to(model_device)
-            #     else:  # Regular CLIP model
-            #         dummy_embedding = model.encode_text(clip_texts).mean(0)
-
-            #     projections.append(dummy_embedding.unsqueeze(0))
-            #     list_hooks.append(dummy_embedding.clone())
-
-            # except Exception as fallback_error:
-            #     print(f"Even CLIP fallback failed for {classname}: {fallback_error}")
-            #     # Skip this class entirely
-            #     continue
-
-    if not projections:
-        # If no projections were created, create minimal dummy data
-        print("Warning: No valid projections created, using dummy data")
-        dummy_proj = torch.randn(1, 1, 512, dtype=torch.float32).to(model_device)
-        dummy_hooks = torch.randn(1, 512, dtype=torch.float32).to(model_device)
-        return dummy_proj, dummy_hooks
-
-    projections = torch.stack(projections, dim=1)
-    list_hooks = torch.stack(list_hooks) if list_hooks else torch.randn(len(classes), 512, dtype=torch.float32).to(model_device)
-    return projections, list_hooks
-
-
-@torch.no_grad()
-def register_model_hooks(model):
-    # Clear existing hooks
-    for name, module in model.named_modules():
-        if hasattr(module, '_forward_hooks'):
-            module._forward_hooks = OrderedDict()
-
-    # Register hooks more carefully for BioCLIP
-    hook_registered = False
-    for name, module in model.named_modules():
-        try:
-            if any(target in name for target in ['ln_final', 'text_projection', 'transformer', 'text_model']):
-                module.register_forward_hook(get_activation_proj(name))
-                hook_registered = True
-                print(f"Registered hook for: {name}")
-        except Exception as e:
-            print(f"Could not register hook for {name}: {e}")
-            continue
-
-    if not hook_registered:
-        print("Warning: No hooks were registered. Model may not work as expected.")
 
 def get_preserved_classes(main_ds, forget_label, args, class_lists):
     classes_preserved_list = class_lists.get(main_ds, [])
-    if args.multiclass_forget:
-        preserved = set([cl.lower() for cl in classes_preserved_list]) - set([cl.lower() for cl in forget_label.split('|')])
-    else:
-        preserved = set([cl.lower() for cl in classes_preserved_list]) - {forget_label.lower()}
-    return list(preserved)
+    forget_set = set(forget_label.split('|')) if args.multiclass_forget else {forget_label}
+    preserved = [cl for cl in classes_preserved_list if cl.lower() not in {f.lower() for f in forget_set}]
+    return preserved
 
+hooks = {}
+
+def get_activation(name):
+    def hook(model, input, output):
+        global hooks
+        hooks[name] = output[0].detach() if isinstance(output, tuple) else output.detach()
+    return hook
 
 @torch.no_grad()
-def compute_proj_into(model, idx_cls_forget, idx_cls_forget_original, original_projections_norm, device):
+def precompute_projections(model, classes, template=['a photo of {}']):
+    global hooks
+    projections_list = []
+    hooks_list = []
+    model_device = next(model.parameters()).device
+    model_dtype = next(model.parameters()).dtype
+
+    for classname in tqdm(classes, desc=f"Projections for {template[0][:15]}..."):
+        try:
+            hooks.clear()
+            classname_clean = classname.replace('_', ' ')
+            texts = [t.format(classname_clean) for t in template]
+            tokenized_texts = bioclip_tokenize(texts).to(model_device)
+            class_embeddings = model.encode_text(tokenized_texts)
+            projections_list.append(class_embeddings)
+
+            hook_key = 'ln_final'
+            if hook_key in hooks:
+                hook_data = hooks[hook_key]
+                eot_indices = tokenized_texts.argmax(dim=-1)
+                eot_features = hook_data[torch.arange(hook_data.shape[0]), eot_indices]
+                avg_eot_feature = eot_features.mean(dim=0)
+                hooks_list.append(avg_eot_feature.clone())
+            else:
+                print(Fore.YELLOW + f"Warning: Hook data for '{hook_key}' not found. Skipping hook feature for class '{classname}'.")
+        except Exception as e:
+            print(Fore.YELLOW + f"Warning: Could not compute projection for class '{classname}'. Error: {e}. Skipping.")
+            continue
+
+    if not projections_list:
+        return None, None
+
+    projections = torch.stack(projections_list, dim=0).to(dtype=model_dtype) 
+    list_hooks = torch.stack(hooks_list, dim=0).to(dtype=model_dtype)
+    return projections, list_hooks
+
+@torch.no_grad()
+def register_model_hooks(model):
+    for name, module in model.named_modules():
+        if 'ln_final'  in name:
+            module.register_forward_hook(get_activation(name))
+            print(Fore.BLUE + f"Registered hook for: {name}")
+
+@torch.no_grad()
+def compute_proj_into(model, original_class_projection, device, method="opposite"):
+    """
+    计算遗忘目标投影，基于原始类别投影
     
-    empty_text = bioclip_tokenize("").to(device)
-    embed = model.encode_text(empty_text).repeat(idx_cls_forget.shape[0], 1)
-    proj_into = embed / embed.norm(dim=-1, keepdim=True)
-
-    while not ((idx_cls_forget_original.to(device) == (original_projections_norm @ proj_into.T).argmax(0)).sum() == 0):
-        embed = model.encode_text(bioclip_tokenize("").to(device)).repeat(idx_cls_forget_original.shape[0], 1)
-        embed += torch.randn(embed.size()).to(device) * 0.5
-        proj_into = embed / embed.norm(dim=-1, keepdim=True)
-        print(f"{100 * '*'} regenerating empty for emptytoken")
-
+    Args:
+        model: CLIP模型
+        original_class_projection: 原始类别的文本投影 (tensor)
+        device: 设备
+        method: 遗忘策略
+            - "opposite": 原始投影的相反方向
+            - "orthogonal": 与原始投影正交的随机方向
+            - "noise": 添加噪声后的方向
+            - "empty": 原始的空文本方法（备选）
+    
+    Returns:
+        proj_into: 遗忘目标投影
+    """
+    original_projection_2d = original_class_projection[:, -1, :] if original_class_projection.dim() == 3 else original_class_projection
+    
+    if method == "opposite":
+        # 方法1: 使用原始投影的相反方向作为遗忘目标
+        proj_into = -original_projection_2d
+        proj_into = proj_into / proj_into.norm(dim=-1, keepdim=True)
+        print(f"Using opposite direction as forgetting target")
+    
+    elif method == "orthogonal":
+        # 方法2: 计算与原始投影正交的随机方向
+        feature_dim = original_projection_2d.shape[-1]
+        random_vector = torch.randn_like(original_projection_2d).to(device)
+        
+        # 使用Gram-Schmidt过程使随机向量与原始投影正交
+        dot_product = (random_vector * original_projection_2d).sum(dim=-1, keepdim=True)
+        orthogonal_vector = random_vector - dot_product * original_projection_2d
+        proj_into = orthogonal_vector / orthogonal_vector.norm(dim=-1, keepdim=True)
+        print(f"Using orthogonal direction as forgetting target")
+    
+    elif method == "noise":
+        # 方法3: 在原始投影上添加强噪声
+        noise_scale = 2.0  # 噪声强度
+        noise = torch.randn_like(original_projection_2d).to(device) * noise_scale
+        noisy_projection = original_projection_2d + noise
+        proj_into = noisy_projection / noisy_projection.norm(dim=-1, keepdim=True)
+        print(f"Using noisy direction as forgetting target (noise_scale={noise_scale})")
+    
+    elif method == "empty":
+        # 方法4: 原始的空文本方法（作为备选）
+        empty_text = bioclip_tokenize("").to(device)
+        embed = model.encode_text(empty_text).repeat(original_projection_2d.shape[0], 1)
+        embed_2d = embed[:, -1, :] if embed.dim() == 3 else embed
+        proj_into = embed_2d / embed_2d.norm(dim=-1, keepdim=True)
+        print(f"Using empty text as forgetting target (original method)")
+    
+    else:
+        raise ValueError(f"Unknown method: {method}")
+    
     return proj_into
 
+# =================================================================================
+# --- Main Execution Block ---
+# =================================================================================
+
 if __name__ == '__main__':
-    
     parser = argparse.ArgumentParser()
-    parser.add_argument("--output_dir", type=str, default="results/result0", help="output directory")
-    parser.add_argument("--seed", type=int, default=0, help="only positive value enables a fixed seed")
-    parser.add_argument("--run_ds", type=str, default="StanfordDogs")
-    parser.add_argument("--backbone_arch", type=str, default="ViT-B/16")#RN50
-    parser.add_argument("--multiclass_forget", type=int, default=0)
+    parser.add_argument("--output_dir", type=str, default="results/result0", help="Output directory")
+    parser.add_argument("--dataset_root", type=str, default="E:\\Others\\DATASETS", help="Root directory for all datasets")
+    parser.add_argument("--seed", type=int, default=0, help="Random seed")
+    parser.add_argument("--run_ds", type=str, default="PLTNetMini", help="Comma-separated list of datasets to run unlearning on")
+    parser.add_argument("--backbone_arch", type=str, default="ViT-B/16", help="CLIP backbone architecture")
+    parser.add_argument("--config_file", type=str, default="configs/trainers/adam_lr2e-4_B256_ep200_ViT16.yaml", help="Path to dassl config file")
+    parser.add_argument("--multiclass_forget", action='store_true', help="Enable multiclass forgetting")
     
     args = parser.parse_args()
-    args.config_file = "configs/trainers/adam_lr2e-4_B256_ep200_ViT16.yaml"
-    print("Arguments : ", args)
+    print("Arguments:", args)
     
     set_seeds(args.seed)
     cfg = initialize_config(args)
-    test_datasets, test_dataloaders, datasets_cls = load_test_datasets(cfg)
-    os.makedirs(args.output_dir, exist_ok=True)   
+    
+    os.makedirs(args.output_dir, exist_ok=True)
     configs = get_configs(args)
-        
-    results_zs = load_results(args.backbone_arch)
-    utils.CUSTOM_TEMPLATES = CUSTOM_TEMPLATES
+    
     all_logs = {}
     
-    if args.run_ds != "" :
-        args.run_ds = [item for item in args.run_ds.split(',')]
-        print(args.run_ds)
-        assert all([ds in all_ds for ds in args.run_ds])
-        run_ds = args.run_ds
-    else:
-        run_ds = all_ds[:]
+    run_ds = all_ds[:] if not args.run_ds else [item.strip() for item in args.run_ds.split(',')]
+    assert all(ds in all_ds for ds in run_ds), "One or more specified run_ds are not valid."
     
     output_base = args.output_dir
     
-    indices_by_ds_all = {}
-    last_idx = 0
-    for ds in all_ds:
-        indices_by_ds_all[ds] = torch.arange(last_idx, last_idx + len(datasets_cls[ds].classnames))
-        last_idx += torch.arange(len(datasets_cls[ds].classnames)).shape[0]
-
+    print("Loading base model...")
     model = get_model(device=device, arch=args.backbone_arch)
+    
+    test_datasets, test_dataloaders, datasets_cls = load_test_datasets(cfg, model)
+    
+    original_model_state = {k: v.clone() for k, v in model.state_dict().items()}
     register_model_hooks(model)
 
-    # precompute projections for all datasets and classes
-    original_projections_all = []
-    final_hooks_all = []
-    all_ds_classes = []
+    cache_filename = f"projections_{args.backbone_arch.replace('/', '-')}.pt"
+    projection_cache_file = os.path.join(args.output_dir, cache_filename)
 
-    for main_ds in all_ds:
-        print(main_ds)
-        ds_classes = datasets_cls[main_ds].classnames
-        projections, list_hooks = precompute_projections(model, ds_classes)
-
-        final_hooks_all.append(list_hooks)
-        original_projections_all.append(projections[0])
-
-        all_ds_classes.extend(ds_classes)
-
-    final_hooks_all = torch.cat(final_hooks_all)
-    original_projections_all = torch.cat(original_projections_all)
+    if os.path.exists(projection_cache_file):
+        print(Fore.GREEN + f"Loading precomputed projections from {projection_cache_file}...")
+        cached_data = torch.load(projection_cache_file)
+        all_projections = cached_data['projections']
+        all_hooks = cached_data['hooks']
+    else:
+        print("Precomputing projections for all classes (will be cached)...")
+        all_projections = {}
+        all_hooks = {}
+        for ds in tqdm(all_ds, desc="Precomputing Projections"):
+            if ds not in datasets_cls: 
+                continue
+            template = [CUSTOM_TEMPLATES.get(ds, 'a photo of a {}, a type of plant.')]
+            projections, list_hooks = precompute_projections(model, datasets_cls[ds].classnames, template=template)
+            if projections is not None:
+                all_projections[ds] = projections
+                all_hooks[ds] = list_hooks
+        print(Fore.GREEN + f"Saving precomputed projections to {projection_cache_file}...")
+        torch.save({'projections': all_projections, 'hooks': all_hooks}, projection_cache_file)
 
     for main_ds in run_ds:
-
-        kwargs = {
-              'lamb_preserve': configs[main_ds]['lamb_preserve'],
-              'lamb_forget': configs[main_ds]['lamb_forget'],
-              'lora_r': configs[main_ds]['lora_r'],
-              'lamb_weight': configs[main_ds]['lamb_weight'],
-          }
-
-        args.output_dir = output_base + f"/{main_ds}"
-        os.makedirs(args.output_dir, exist_ok=True)
-        with open(output_base + "/args.txt", "w") as f:
-            f.write(str(args))
-
-        other_ds = all_ds[:]
-        other_ds.remove(main_ds)
-        all_logs[main_ds] = {'settings': {'kwargs': kwargs}}
-
-        forget_classes_list = [forget_classes_all[main_ds]] if args.multiclass_forget else forget_classes_all[main_ds]
-
-        print("KWARGS", kwargs)
+        print(f"\n{'='*30}\nStarting unlearning for dataset: {main_ds}\n{'='*30}")
+        kwargs = configs[main_ds]
+        
+        forget_classes_list = forget_classes_all[main_ds]
+        if not isinstance(forget_classes_list, list):
+            forget_classes_list = [forget_classes_list]
+        
         for forget_label in forget_classes_list:
+            all_logs.setdefault(main_ds, {})
+            print(f"\n--- Forgetting class: {forget_label} ---\n")
+            model.load_state_dict(original_model_state)
+            
+            # Calculate and print similarities before unlearning
+            print(Fore.CYAN + "--- Calculating Average Class Similarities (Before Unlearning) ---")
+            sims_before = calculate_average_class_similarity(
+                model,
+                test_dataloaders[main_ds],
+                datasets_cls[main_ds].classnames,
+                CUSTOM_TEMPLATES.get(main_ds, 'a photo of a {}.'),
+                device
+            )
+            print(f"  - Similarity for forget class '{forget_label}': {sims_before.get(forget_label, 'N/A'):.4f}")
+            preserved_samples = [c for c in datasets_cls[main_ds].classnames if c != forget_label][:3]
+            for preserved_cls in preserved_samples:
+                print(f"  - Similarity for preserved class '{preserved_cls}': {sims_before.get(preserved_cls, 'N/A'):.4f}")
+            
+            all_logs[main_ds][forget_label] = {'similarities_before_unlearn': sims_before}
 
-            idx_cls_forget = []
-            idx_cls_forget_original = []
-            if args.multiclass_forget:
-                for c in forget_label:
-                    idx_cls_forget.append(all_ds_classes.index(c))
-                    idx_cls_forget_original.append(datasets_cls[main_ds].classnames.index(c))
-                forget_label = '|'.join(forget_label)
+            
+            print("Constructing matched preserve set for hooks and outputs...")
+            preserve_hooks_list = []
+            preserve_output_list = []
+
+            for ds_name, ds_hooks in all_hooks.items():
+                if ds_name == main_ds:
+                    preserved_class_names = get_preserved_classes(main_ds, forget_label, args, {'PLTNetMini': pltnetmini_list, 'StanfordDogs': stanforddogs_list, 'StanfordCars': stanfordcars_list, 'Caltech101': caltech_list, 'OxfordFlowers': oxfordflowers_list})
+                    if preserved_class_names:
+                        indices = [datasets_cls[ds_name].classnames.index(c) for c in preserved_class_names]
+                        preserve_hooks_list.append(ds_hooks[indices])
+                        preserve_output_list.append(all_projections[ds_name][indices])
+            
+            if preserve_hooks_list:
+                preserve_hooks = torch.cat(preserve_hooks_list, dim=0)
+                preserve_output = torch.cat(preserve_output_list, dim=0)
+                if preserve_output.dim() == 3:
+                    preserve_output = preserve_output.squeeze(1)
             else:
-                idx_cls_forget.append(all_ds_classes.index(forget_label))
-                idx_cls_forget_original.append(datasets_cls[main_ds].classnames.index(forget_label))
+                feature_dim = list(all_hooks.values())[0].shape[-1]
+                preserve_hooks = torch.empty(0, feature_dim).to(device)
+                preserve_output = torch.empty(0, feature_dim).to(device)
 
-            idx_cls_forget = torch.tensor(idx_cls_forget).long()
-            idx_cls_forget_original = torch.tensor(idx_cls_forget_original).long()
+            forget_class_idx = datasets_cls[main_ds].classnames.index(forget_label)
+            change_hooks = all_hooks[main_ds][forget_class_idx].unsqueeze(0)
+            
+            # 获取原始遗忘类别的投影作为参考
+            original_forget_projection = all_projections[main_ds][forget_class_idx].unsqueeze(0)
+            
+            original_dtype = model.text_projection.dtype
+            preserve_hooks = preserve_hooks.float().to(device)
+            preserve_output = preserve_output.float().to(device)
+            change_hooks = change_hooks.float().to(device)
 
-            original_projections_all_full = original_projections_all.clone()
-            change_hooks = final_hooks_all[idx_cls_forget, :]
-            original_projections_norm = original_projections_all_full[indices_by_ds_all[main_ds]] / original_projections_all_full[indices_by_ds_all[main_ds]].norm(dim=1, keepdim=True)
-
-            model = get_model(device=device, arch=args.backbone_arch)
-            register_model_hooks(model)
-
-            classes_preserved_list = get_preserved_classes(main_ds, forget_label, args, {
-                'OxfordFlowers': oxfordflowers_list,
-                'StanfordDogs': stanforddogs_list,
-                'StanfordCars': stanfordcars_list,
-                'Caltech101': caltech_list
-            })
-
-            projection_additional, preserve_hooks = precompute_projections(model, classes_preserved_list)
-            preserve_output = projection_additional[0]
-
-            all_logs[main_ds][forget_label] = {}
-            new_weights = {}
-            r, lamb_preserve, lamb_forget, lamb_weight = kwargs['lora_r'], kwargs['lamb_preserve'],  kwargs['lamb_forget'],  kwargs['lamb_weight']
-
-            print(100*"=")
-            model = get_model(device=device, arch=args.backbone_arch)
             in_proj, out_proj = model.text_projection.shape
+            
+            # 使用原始类别投影来计算遗忘目标
+            # 可以选择不同的遗忘策略: "opposite", "orthogonal", "noise", "empty"
+            forgetting_method = "empty"  # 默认使用空投影
+            proj_into = compute_proj_into(model, original_forget_projection.float().to(device), device, method=forgetting_method).float()
 
-            proj_into = compute_proj_into(model, idx_cls_forget, idx_cls_forget_original, original_projections_norm, device)
+            best_weights = None
+            current_lambdas = {'forget': kwargs['lamb_forget']}
 
-
-            for _ in range(UNLEARN_TRIALS):
-
-                new_text_proj = Linear(in_proj, out_proj, r=r, bias=False, device=device)
-                new_text_proj.weight = torch.nn.Parameter(model.text_projection.T)
+            for trial in range(UNLEARN_TRIALS):
+                print(f"\n--- Starting Trial {trial+1}/{UNLEARN_TRIALS} ---")
+                
+                new_text_proj = Linear(in_proj, out_proj, r=kwargs['lora_r'], bias=False, device=device)
+                new_text_proj.weight = torch.nn.Parameter(model.text_projection.T.clone())
                 new_text_proj.weight.requires_grad = False
-
-                optimizer = torch.optim.Adam(list(new_text_proj.parameters()), lr=0.01)
+                
+                # 确保LoRA模块处于训练模式
+                new_text_proj.train()
+                
+                # 检查LoRA参数是否正确初始化
+                print(f"LoRA A shape: {new_text_proj.lora_A.shape}, requires_grad: {new_text_proj.lora_A.requires_grad}")
+                print(f"LoRA B shape: {new_text_proj.lora_B.shape}, requires_grad: {new_text_proj.lora_B.requires_grad}")
+                print(f"LoRA scaling factor: {new_text_proj.scaling}")
+                
+                optimizer = torch.optim.Adam(new_text_proj.parameters(), lr=1e-4)
+                scheduler = CosineAnnealingLR(optimizer, T_max=EPOCHS, eta_min=1e-7)
 
                 with torch.no_grad():
-                    initial_forget_loss = torch.norm(proj_into - new_text_proj(change_hooks), p=2)
+                    initial_proj = new_text_proj(change_hooks)
+                    initial_proj_2d = initial_proj[:, -1, :] if initial_proj.dim() == 3 else initial_proj
+                    initial_forget_loss_for_trials = torch.norm(proj_into - initial_proj_2d, p=2).item()
 
-                best_loss = np.inf
+                print(f"Trial {trial+1}: Initial forget loss is {initial_forget_loss_for_trials:.4f}. Current lamb_forget={current_lambdas['forget']:.2f}, lamb_preserve={kwargs['lamb_preserve']:.2f}")
+                
+                final_forget_loss = None
+                initial_lora_a = new_text_proj.lora_A.clone()
+                initial_lora_b = new_text_proj.lora_B.clone()
+                
                 for epoch in range(EPOCHS):
+                    # 确保模块在训练模式
+                    new_text_proj.train()
+                    
                     new_preserve_output = new_text_proj(preserve_hooks)
                     new_forget_output = new_text_proj(change_hooks)
-
-                    weight_loss = torch.norm((new_text_proj.lora_B @ new_text_proj.lora_A).transpose(0, 1), p=2)
-
-                    # Debug tensor shapes
-                    if epoch == 0:
-                        print(f"Debug shapes:")
-                        print(f"  preserve_output: {preserve_output.shape}")
-                        print(f"  new_preserve_output: {new_preserve_output.shape}")
-                        print(f"  proj_into: {proj_into.shape}")
-                        print(f"  new_forget_output: {new_forget_output.shape}")
+                    new_forget_output_2d = new_forget_output[:, -1, :] if new_forget_output.dim() == 3 else new_forget_output
                     
-                    # Handle BioCLIP 3D tensor output by taking the CLS token (last position)
-                    # BioCLIP returns [batch_size, sequence_length, embedding_dim]
-                    # CLIP returns [batch_size, embedding_dim]
+                    delta_w = (new_text_proj.lora_B @ new_text_proj.lora_A)
                     
-                    # Process preserve outputs
-                    if new_preserve_output.dim() == 3:
-                        # Take the CLS token (last token) from BioCLIP output
-                        new_preserve_output_trunc = new_preserve_output[:, -1, :]  # [101, 512]
+                    forget_loss_val = torch.norm(proj_into - new_forget_output_2d, p=2)
+                    
+                    if preserve_hooks.shape[0] > 0:
+                        preserve_loss_val = torch.norm(preserve_output - new_preserve_output, p=2)
                     else:
-                        new_preserve_output_trunc = new_preserve_output
+                        preserve_loss_val = torch.tensor(0.0).to(device)
+
+                    weight_loss = torch.norm(delta_w, p=2) 
                     
-                    # Ensure preserve_output is 2D (should already be from CLIP)
-                    preserve_output_trunc = preserve_output  # [101, 512]
+                    loss = current_lambdas['forget'] * forget_loss_val + \
+                           kwargs['lamb_preserve'] * preserve_loss_val + \
+                           kwargs['lamb_weight'] * weight_loss
                     
-                    # Process forget outputs
-                    if new_forget_output.dim() == 3:
-                        # Take the CLS token (last token) from BioCLIP output
-                        new_forget_output_trunc = new_forget_output[:, -1, :]  # [1, 512]
-                    else:
-                        new_forget_output_trunc = new_forget_output
-                    
-                    # Ensure proj_into is 2D (should already be from CLIP)
-                    proj_into_trunc = proj_into  # [1, 512]
-                    weight_loss = torch.norm((new_text_proj.lora_B @ new_text_proj.lora_A).transpose(0, 1), p=2)
-
-                    loss = lamb_forget * torch.norm(proj_into_trunc - new_forget_output_trunc, p=2) + \
-                           lamb_preserve * torch.norm(preserve_output_trunc - new_preserve_output_trunc, p=2) + \
-                           lamb_weight * weight_loss
-
-                    if epoch % PRINT_EVERY == 0:
-                        print(torch.norm(proj_into_trunc - new_forget_output_trunc, p=2), torch.norm(preserve_output_trunc - new_preserve_output_trunc, p=2), weight_loss)
-
-                    if loss < best_loss:
-                        new_text_proj.train(False)
-                        best_weights = new_text_proj.weight.clone()
-                        new_text_proj.train(True)
-
+                    optimizer.zero_grad()
                     loss.backward()
                     optimizer.step()
-                    optimizer.zero_grad()
+                    scheduler.step()
 
+                    # Periodic evaluation during training
+                    if (epoch + 1) % 1000 == 0 or (epoch + 1) == EPOCHS:
+                        with torch.no_grad():
+                            # 正确合并LoRA权重，包括scaling因子
+                            current_delta_w = (new_text_proj.lora_B @ new_text_proj.lora_A) * new_text_proj.scaling
+                            current_weights_fp32 = (new_text_proj.weight.T + current_delta_w.T).clone()
+                            current_weights = current_weights_fp32.to(dtype=original_dtype)
+
+                            # 暂存原始权重，评估后恢复
+                            original_text_projection = model.text_projection.clone()
+                            model.text_projection = torch.nn.Parameter(current_weights)
+                            
+                            # 同时检查是否需要更新底层模型的text_projection
+                            if hasattr(model, 'model') and hasattr(model.model, 'text_projection'):
+                                original_underlying_projection = model.model.text_projection.clone()
+                                model.model.text_projection = torch.nn.Parameter(current_weights)
+                                print(f"  - Updated underlying model text_projection")
+                            
+                            model.eval()
+                            
+                            # 验证权重确实被更新
+                            updated_norm = torch.norm(model.text_projection).item()
+                            original_norm = torch.norm(original_text_projection).item()
+                            print(f"  - Weight update verification: {original_norm:.6f} -> {updated_norm:.6f}")
+
+                        print(Fore.MAGENTA + f"\n--- Calculating Intermediate Similarities at Epoch {epoch+1} ---")
+                        sims_epoch = calculate_average_class_similarity(
+                            model,
+                            test_dataloaders[main_ds],
+                            datasets_cls[main_ds].classnames,
+                            CUSTOM_TEMPLATES.get(main_ds, 'a photo of a {}.'),
+                            device
+                        )
+
+                        forget_sim_start = sims_before.get(forget_label, float('nan'))
+                        forget_sim_current = sims_epoch.get(forget_label, float('nan'))
+                        print(f"  - Forget Class '{forget_label}': {forget_sim_current:.4f} (Start: {forget_sim_start:.4f})")
+                        print(f"  - Delta magnitude: {torch.norm(current_delta_w).item():.6f}")
+                        
+                        # 调试：检查ln_final的输出是否发生变化
+                        with torch.no_grad():
+                            # 获取遗忘类别的当前ln输出
+                            forget_class_name_clean = forget_label.replace('_', ' ')
+                            test_text = bioclip_tokenize([f"a photo of a {forget_class_name_clean}, a type of plant."]).to(device)
+                            
+                            # 清除之前的hooks
+                            hooks.clear()
+                            
+                            # 通过模型获取文本特征，这会触发hooks
+                            text_features = model.encode_text(test_text)
+                            
+                            # 检查ln_final的输出
+                            if 'ln_final' in hooks:
+                                current_ln_output = hooks['ln_final'].mean().item()
+                                print(f"  - Current ln_final output mean: {current_ln_output:.6f}")
+                            
+                            # 检查text_projection权重的变化
+                            current_text_proj_norm = torch.norm(model.text_projection).item()
+                            print(f"  - Text projection norm: {current_text_proj_norm:.6f}")
+                        
+                        # 另外，检查原始的change_hooks和当前处理后的输出差异
+                        with torch.no_grad():
+                            original_output = new_text_proj.weight.T @ change_hooks.T
+                            current_output_with_lora = new_text_proj(change_hooks)
+                            lora_effect = torch.norm(current_output_with_lora - original_output.T).item()
+                            print(f"  - LoRA effect on change_hooks: {lora_effect:.6f}")
+
+                        log_key = 'epoch_similarities'
+                        if log_key not in all_logs[main_ds][forget_label]:
+                            all_logs[main_ds][forget_label][log_key] = {}
+                        all_logs[main_ds][forget_label][log_key][epoch + 1] = sims_epoch
+                        
+                        # 恢复原始权重，让LoRA训练继续
+                        model.text_projection = torch.nn.Parameter(original_text_projection)
+                        if hasattr(model, 'model') and hasattr(model.model, 'text_projection'):
+                            model.model.text_projection = torch.nn.Parameter(original_underlying_projection)
+
+                # 保存最终的遗忘损失
+                final_forget_loss = forget_loss_val.item()
+
+                # 检查LoRA参数是否有更新
+                lora_a_change = torch.norm(new_text_proj.lora_A - initial_lora_a).item()
+                lora_b_change = torch.norm(new_text_proj.lora_B - initial_lora_b).item()
+                print(f"LoRA parameter changes: A={lora_a_change:.6f}, B={lora_b_change:.6f}")
 
                 with torch.no_grad():
-                    # make sure there was enough reduction
-                    print("initial_forget_loss", initial_forget_loss)
-                    final_proj = change_hooks @ best_weights.T
+                    reduction = (initial_forget_loss_for_trials - final_forget_loss) / (initial_forget_loss_for_trials + 1e-8)
                     
-                    # Handle dimension mismatch for final evaluation
-                    if proj_into.shape != final_proj.shape:
-                        if len(proj_into.shape) == 3 and len(final_proj.shape) == 3:
-                            min_seq = min(proj_into.shape[1], final_proj.shape[1])
-                            min_feat = min(proj_into.shape[2], final_proj.shape[2])
-                            proj_into_final = proj_into[:, :min_seq, :min_feat]
-                            final_proj_trunc = final_proj[:, :min_seq, :min_feat]
-                        elif len(proj_into.shape) == 2 and len(final_proj.shape) == 2:
-                            min_feat = min(proj_into.shape[1], final_proj.shape[1])
-                            proj_into_final = proj_into[:, :min_feat]
-                            final_proj_trunc = final_proj[:, :min_feat]
-                        else:
-                            # Flatten and truncate if shapes are incompatible
-                            proj_into_final = proj_into.flatten()
-                            final_proj_trunc = final_proj.flatten()
-                            min_len = min(len(proj_into_final), len(final_proj_trunc))
-                            proj_into_final = proj_into_final[:min_len]
-                            final_proj_trunc = final_proj_trunc[:min_len]
-                    else:
-                        proj_into_final = proj_into
-                        final_proj_trunc = final_proj
+                    print(f"Trial {trial+1} Summary: Initial Loss={initial_forget_loss_for_trials:.4f}, Final Loss={final_forget_loss:.4f}, Reduction={reduction:.2%}")
                     
-                    final_loss = torch.norm(proj_into_final - final_proj_trunc, p=2)
-                    reduction = (initial_forget_loss - final_loss).abs() / initial_forget_loss
-                    print("final", final_loss)
-                    if reduction < REDUCTION_THR:
-                        lamb_forget += 0.05
-                        print("New forget ", lamb_forget)
-                        continue
-                    else:
+                    if reduction >= REDUCTION_THR:
+                        print(Fore.GREEN + "Unlearning successful, breaking trial loop.")
+                        # 正确合并LoRA权重，包括scaling因子
+                        delta_w = (new_text_proj.lora_B @ new_text_proj.lora_A) * new_text_proj.scaling
+                        final_weights_fp32 = (new_text_proj.weight.T + delta_w.T).clone()
+                        best_weights = final_weights_fp32.to(dtype=original_dtype)
+                        print(f"Applied LoRA delta with scaling {new_text_proj.scaling:.4f}")
                         break
+                    else:
+                        best_weights = None
+                        if trial < UNLEARN_TRIALS - 1:
+                            current_lambdas['forget'] *= 1.2 
+                            print(f"Reduction insufficient. Increasing lamb_forget aggressively to {current_lambdas['forget']:.2f} for the next trial.")
+                        else:
+                            print(Fore.RED + "All trials failed to meet the reduction threshold.")
 
-            new_weights[f"proj_weight"] = torch.nn.Parameter(best_weights)
-
-            model.load_state_dict({**model.state_dict(), 'text_projection': new_weights[f"proj_weight"].T})
-            torch.save(model.state_dict(), args.output_dir + f"/model_{main_ds}_{forget_label}.pth")
-            model.eval()
-
-            if args.multiclass_forget:
-                results_ds = eval_all_ds(model, datasets_cls, main_ds, forget_label, test_dataloaders, None,
-                     eval_forgetonly=IGNORE_OTHER_DS, debug=True, device=device, ignore_labels_main=forget_classes_list[0])
-            else:
+            if best_weights is not None:
+                # 保存更新前的权重，用于验证
+                old_weights_norm = torch.norm(model.text_projection).item()
+                
+                # 检查模型结构
+                if hasattr(model, 'model') and hasattr(model.model, 'text_projection'):
+                    print("Updating both adapter and underlying model text_projection")
+                    model.model.text_projection = torch.nn.Parameter(best_weights)
+                
+                model.text_projection = torch.nn.Parameter(best_weights)
+                new_weights_norm = torch.norm(model.text_projection).item()
+                print(f"Text projection weight norm change: {old_weights_norm:.6f} -> {new_weights_norm:.6f}")
+                
+                # 强制设置为训练模式下不被重置
+                if hasattr(model, 'model'):
+                    model.model.eval()
+                model.eval()
+                
+                print(Fore.GREEN + "\n--- Calculating Average Class Similarities (After Unlearning) ---")
+                sims_after = calculate_average_class_similarity(
+                    model,
+                    test_dataloaders[main_ds],
+                    datasets_cls[main_ds].classnames,
+                    CUSTOM_TEMPLATES.get(main_ds, 'a photo of a {}.'),
+                    device
+                )
+                print(f"  - Similarity for forget class '{forget_label}': {sims_after.get(forget_label, 'N/A'):.4f} (Before: {sims_before.get(forget_label, 'N/A'):.4f})")
+                for preserved_cls in preserved_samples:
+                    print(f"  - Similarity for preserved class '{preserved_cls}': {sims_after.get(preserved_cls, 'N/A'):.4f} (Before: {sims_before.get(preserved_cls, 'N/A'):.4f})")
+                
+                all_logs[main_ds][forget_label]['similarities_after_unlearn'] = sims_after
+                
                 results_ds = eval_all_ds(model, datasets_cls, main_ds, forget_label, test_dataloaders,
-                                         None, eval_forgetonly=IGNORE_OTHER_DS, debug=True, device=device)
+                                         None, eval_forgetonly=False, debug=True, device=device)
+                
+                all_logs[main_ds][forget_label]['final_results'] = results_ds
+                print(f"*** Final results for forgetting '{forget_label}': {results_ds[main_ds].get(forget_label, 'N/A')} ***")
 
-            # all_logs[main_ds][forget_label]['final_results'] = results_ds
-            # print(f"{20 * '*'} Final results for {forget_label}", results_ds[main_ds][forget_label])
+                model_save_path = os.path.join(output_base, f"model_{main_ds}_{forget_label}.pth")
+                print(Fore.GREEN + f"Saving unlearned model to {model_save_path}...")
+                torch.save(model.state_dict(), model_save_path)
+                
+                # 转换为JSON可序列化格式并保存
+                serializable_logs = convert_to_json_serializable(all_logs)
+                with open(os.path.join(output_base, "logs.json"), "w") as f:
+                    json.dump(serializable_logs, f, indent=4)
+            else:
+                print(f"Error: Could not find suitable weights for forgetting '{forget_label}'.")
 
-            # with open(output_base + "/logs.json", "w") as f:
-            #     json.dump(all_logs, f)
-
-        print(all_logs)
-
-    with open(output_base + "/logs.json", "w") as f:
-        json.dump(all_logs, f)
+    print("\nAll tasks completed.")
+    # 转换为JSON可序列化格式并保存最终日志
+    serializable_logs = convert_to_json_serializable(all_logs)
+    with open(os.path.join(output_base, "logs.json"), "w") as f:
+        json.dump(serializable_logs, f, indent=4)
