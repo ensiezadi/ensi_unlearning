@@ -1,113 +1,18 @@
-caltech_list = [
-    "accordion", "bagpipes", "banjo", "bassoon", "cello", "clarinet", "cornet", "double_bass", 
-    "drum_set", "flute", "french_horn", "guitar", "harp", "mandolin", "marimba", "oboe", 
-    "piano", "saxophone", "sitar", "sousaphone", "tambourine", "trombone", "trumpet", 
-    "tuba", "ukulele", "viola", "violin", "xylophone", "zenko_drum", "glockenspiel", 
-    "concertina", "hurdy-gurdy", "lute", "melodica", "piccolo", "pipe_organ", "recorder", 
-    "theremin", "triangle", "bass_drum", "cabasa", "castanets", "claves", "conga_drum", 
-    "cowbell", "djembe", "guiro", "kalimba", "maracas", "shekere", "sleigh_bells", 
-    "snare_drum", "talking_drum", "timpani", "vibraslap", "whip", "washboard", "zephyr_organ", 
-    "zither", "azimuth_marker", "bell_tower", "belfry", "cathedral_spire", "church_steeple", 
-    "dome", "gazebo", "lighthouse", "obelisk", "pagoda", "watchtower", "water_tower", 
-    "windmill", "cairn", "cenotaph", "column", "monolith", "obelisk", "pavilion", "pyramid", 
-    "stupa", "totem_pole", "triumphal_arch", "rotunda", "spire", "tower", "ziggurat", 
-    "amphibian", "anteater", "armadillo", "barramundi", "basilisk", "beaver", "capybara", 
-    "chameleon", "coatimundi", "echidna", "gecko", "gila_monster", "iguana", "komodo_dragon", 
-    "koala", "marsupial", "mole", "monotreme", "newt", "numbat", "opossum", "pangolin", 
-    "platypus", "quokka", "quoll", "salamander", "shrew", "skink", "sloth", "sugar_glider", 
-    "tasmanian_devil", "tree_frog", "tuatara", "wombat", "anhinga", "auk", "bittern", 
-    "booby", "cormorant", "crane", "curlew", "egret", "flamingo", "frigatebird", "gannet", 
-    "grebe", "heron", "ibis", "jaeger", "kestrel", "kingfisher", "kittiwake", "loon", 
-    "oystercatcher", "pelican", "petrel", "puffin", "rail", "razorbill", "sandpiper", 
-    "shearwater", "skua", "snipe", "tern", "turnstone", "wader", "whimbrel", "woodcock", 
-    "meerkat", "mongoose", "pangolin", "platypus", "potto", "puffin", "quokka", "quoll", 
-    "raccoon", "red_panda", "ringtail", "skunk", "sloth", "sugar_glider", "tasmanian_devil", 
-    "tenrec", "tree_shrew", "wombat", "zebra_finch", "zebu", "zonkey", "zorilla", "zygodont"
-]
+# 这些列表用于定义各数据集的保持类别(Preserved Classes)
+# 在遗忘学习中，当遗忘指定类别时，需要确保其他类别的性能不受影响
+
+# 当前项目中暂未使用的数据集类别列表 - 可以根据需要启用
+caltech_list = [] 
+stanfordcars_list = []
+oxfordflowers_list = []
+stanforddogs_list = []
+
+# 如果需要使用其他数据集，可以取消注释并添加相应的类别列表
 
 
-stanfordcars_list = [
-    "Chevrolet_Silverado_1500", "GMC_Sierra_1500", "Toyota_Tundra", "Nissan_Titan", 
-    "Ram_1500", "Ford_F-150", "Honda_Ridgeline", "Chevrolet_Colorado", 
-    "GMC_Canyon", "Toyota_Tacoma", "Nissan_Frontier", "Jeep_Gladiator", 
-    "Ford_Maverick", "Hyundai_Santa_Cruz", "Chevrolet_Silverado_2500HD", 
-    "GMC_Sierra_2500HD", "Ford_F-250_Super_Duty", "Ram_2500", 
-    "Chevrolet_Silverado_3500HD", "GMC_Sierra_3500HD", "Ford_F-350_Super_Duty", 
-    "Ram_3500", "Chevrolet_Silverado_4500HD", "Ford_F-450_Super_Duty", 
-    "GMC_Sierra_4500HD", "Ram_4500", "Chevrolet_Silverado_5500HD", 
-    "Ford_F-550_Super_Duty", "GMC_Sierra_5500HD", "Ram_5500", 
-    "Ford_F-650", "Ford_F-750", "International_CV_Series", 
-    "Mitsubishi_Fuso_Canter", "Isuzu_N-Series", "Hino_268", 
-    "Freightliner_M2_106", "Peterbilt_220", "Kenworth_T270", 
-    "Ram_ProMaster", "Ford_Transit", "Mercedes-Benz_Sprinter", 
-    "Nissan_NV", "Chevrolet_Express", "GMC_Savana", 
-    "Ram_ProMaster_City", "Ford_Transit_Connect", "Nissan_NV200", 
-    "Chevrolet_Colorado_ZR2", "Toyota_Tacoma_TRD_Pro", "Jeep_Wrangler_Rubicon", 
-    "Ford_Ranger_Tremor", "Ram_Rebel", "Chevrolet_Silverado_Trail_Boss", 
-    "GMC_Sierra_AT4", "Ford_F-150_Raptor", "Nissan_Titan_XD", 
-    "Toyota_Tundra_TRD_Pro", "Chevrolet_Avalanche", "Honda_Element", 
-    "Ford_Explorer_Sport_Trac", "Lincoln_Mark_LT", "Cadillac_Escalade_EXT", 
-    "Hummer_H2_SUT", "Chevrolet_SSR", "Subaru_Baja", 
-    "Dodge_Dakota", "Mazda_B-Series", "Mitsubishi_Raider", 
-    "Suzuki_Equator", "Isuzu_i-Series", "Ford_Courier", 
-    "Volkswagen_Amarok", "Peugeot_Landtrek", "Fiat_Fullback", 
-    "Renault_Alaskan", "Mercedes-Benz_X-Class", "SsangYong_Musso", 
-    "Great_Wall_Steed", "Mahindra_Scorpio_Getaway", "Tata_Xenon", 
-    "Holden_Colorado", "HSV_Maloo", "Ford_Falcon_Ute", 
-    "Chevrolet_S-10", "Ford_Ranger_Raptor", "RAM_1200", 
-    "Toyota_Hilux", "Chevrolet_LUV", "Ford_Courier", 
-    "Mazda_BT-50", "Mitsubishi_Triton", "Nissan_Navara", 
-    "Isuzu_D-Max", "Volkswagen_Tarok", "Jeep_Comanche"
-]
+# ============== 当前项目使用的数据集类别列表 ==============
 
-oxfordflowers_list = [
-    "Rose", "Tulip", "Lily", "Daisy", "Sunflower", "Orchid", "Marigold", "Lavender", 
-    "Daffodil", "Chrysanthemum", "Carnation", "Hibiscus", "Iris", "Peony", "Poppy", 
-    "Lotus", "Bluebell", "Magnolia", "Gardenia", "Jasmine", "Azalea", "Camellia", 
-    "Geranium", "Hyacinth", "Petunia", "Zinnia", "Begonia", "Cosmos", "Foxglove", 
-    "Freesia", "Gladiolus", "Hollyhock", "Lilac", "Narcissus", "Snapdragon", 
-    "Sweet_Pea", "Verbena", "Violet", "Wisteria", "Aster", "Anemone", "Gaura", 
-    "Bachelor's_Button", "Bellflower", "Buttercup", "Calla_Lily", "Canna", "Protea",
-    "Columbine", "Coreopsis", "Delphinium", "Gaillardia", "Primula",
-    "Heliotrope", "Impatiens", "Kalanchoe", "Lantana", "Morning_Glory", "Nasturtium", 
-    "Pansy", "Phlox", "Plumeria", "Primrose", "Ranunculus", "Rhododendron", 
-    "Scabiosa", "Sedum", "Stock", "Tithonia", "Trillium", "Tuberose", "Wallflower", 
-    "Yarrow", "Yucca", "Amaryllis", "Bougainvillea", "Bromelia", "Angelonia", "Armeria", "Balloon_Flower", "Ballmoss", 
-    "Bee_Balm", "Black-eyed_Susan", "Bleeding_Heart", "Borage", "Browallia", 
-    "Candytuft", "Clematis", "Cleome", "Cockscomb", "Coral_Bells", "Corydalis", 
-    "Crocosmia", "Cyclamen", "Diascia", "Dusty_Miller", "Echinacea", "Euphorbia", 
-    "Four_o'Clock", "Gazania", "Geum"
-]
-
-
-
-stanforddogs_list = [
-    "Shih_Tzu", "Lhasa_Apso", "Maltese", "Havanese", "Bichon_Frise", "Yorkshire_Terrier",
-    "Pomeranian", "Cavalier_King_Charles_Spaniel", "Papillon", "Japanese_Chin", "Brussels_Griffon",
-    "Miniature_Schnauzer", "West_Highland_White_Terrier", "Cairn_Terrier", "Norfolk_Terrier",
-    "Norwich_Terrier", "Tibetan_Spaniel", "Tibetan_Terrier", "Silky_Terrier", "Affenpinscher",
-    "Chinese_Crested", "Italian_Greyhound", "Toy_Manchester_Terrier", "Toy_Fox_Terrier",
-    "Australian_Terrier", "Border_Terrier", "Dandie_Dinmont_Terrier", "Sealyham_Terrier",
-    "Skye_Terrier", "Welsh_Terrier", "Lakeland_Terrier", "Jack_Russell_Terrier",
-    "Parson_Russell_Terrier", "Rat_Terrier", "Bedlington_Terrier", "Manchester_Terrier",
-    "Fox_Terrier", "Wire_Fox_Terrier", "Smooth_Fox_Terrier",
-    "Irish_Terrier", "Glen_of_Imaal_Terrier", "Kerry_Blue_Terrier", "Soft_Coated_Wheaten_Terrier",
-    "Bull_Terrier", "Miniature_Bull_Terrier", "Boston_Terrier", "French_Bulldog",
-    "English_Bulldog", "American_Bulldog", "Boxer", "Pug", "Miniature_Pinscher",
-    "German_Pinscher", "Doberman_Pinscher", "Great_Dane", "Mastiff", "Bullmastiff",
-    "Neapolitan_Mastiff", "Dogue_de_Bordeaux", "Rottweiler", "Saint_Bernard",
-    "Bernese_Mountain_Dog", "Greater_Swiss_Mountain_Dog", "Newfoundland",
-    "Leonberger", "Tibetan_Mastiff", "Chihuahua", "Poodle",
-    "Miniature_Poodle", "Standard_Poodle", "Shetland_Sheepdog",
-    "Collie", "Border_Collie", "Australian_Shepherd", "Australian_Cattle_Dog",
-    "Old_English_Sheepdog", "Bearded_Collie", "Briard", "Welsh_Corgi", "Cardigan_Welsh_Corgi",
-    "Pembroke_Welsh_Corgi", "American_Eskimo_Dog", "Alaskan_Malamute", "Siberian_Husky",
-    "Samoyed", "Shiba_Inu", "Akita", "Basenji", "Beagle", "Bloodhound", "Basset_Hound",
-    "Dachshund", "Coonhound", "Foxhound", "Whippet", "Greyhound", "Saluki",
-    "Afghan_Hound", "Borzoi", "Irish_Wolfhound", "Scottish_Deerhound"
-]
-
-
+# PLTNetMini植物数据集的所有类别 (25个植物类)
 pltnetmini_list = [
     "Aegopodium_podagraria",
     "Alcea_rosea",
@@ -135,3 +40,43 @@ pltnetmini_list = [
     "Trifolium_pratense",
     "Trifolium_repens"
 ]
+
+# Bird525数据集使用数字ID作为类别标识，这里不需要预定义类别列表
+# Bird525的保持类别将在运行时从数据集动态获取
+# 注意: forget_cls.py 中定义了要遗忘的鸟类ID: ['0', '10', '42']
+
+# Bird525类别列表 - 占位符，将由动态获取替代
+# 这里提供一个空列表，实际使用时会从dataset.classnames动态获取
+bird525_list = []  # 525个鸟类，运行时动态填充
+
+# ============== 动态类别获取函数 ==============
+
+def get_class_lists(datasets_cls):
+    """
+    获取所有数据集的类别列表，包括动态获取的Bird525类别
+    
+    Args:
+        datasets_cls: 数据集类的字典，包含classnames属性
+    
+    Returns:
+        dict: 包含所有数据集类别列表的字典
+    """
+    class_lists = {
+        'PLTNetMini': pltnetmini_list,
+        'StanfordDogs': stanforddogs_list, 
+        'StanfordCars': stanfordcars_list,
+        'Caltech101': caltech_list,
+        'OxfordFlowers': oxfordflowers_list
+    }
+    
+    # 动态获取Bird525的类别列表
+    if 'Bird525' in datasets_cls:
+        class_lists['Bird525'] = datasets_cls['Bird525'].classnames
+    
+    return class_lists
+
+# ============== 功能说明 ==============
+# 这些列表的作用:
+# 1. 在遗忘学习过程中定义需要保持性能的类别
+# 2. 构造preserve_loss，确保遗忘指定类别时其他类别不受影响  
+# 3. get_preserved_classes()函数会排除遗忘类别，返回需要保持的类别列表

@@ -1,3 +1,4 @@
+import os
 import numpy as np
 import torch
 from clip import clip
@@ -6,55 +7,76 @@ from tqdm import tqdm
 from sklearn.metrics import confusion_matrix
 import json
 import pandas as pd
+import matplotlib.pyplot as plt
+import swanlab
+from colorama import Fore, init
 
 from dassl.config import get_cfg_default
 from dassl.data.datasets.build import build_dataset
+from bioclip_adapter_fixed import clip_classifier
 
 import datasets.stanford_cars
 import datasets.stanford_dogs
 import datasets.caltech101
 import datasets.oxford_flowers
+_swanlab_initialized = False
+init(autoreset=True)
 
-CUSTOM_TEMPLATES = {}
+CUSTOM_TEMPLATES = {
+    "OxfordFlowers": "a photo of a {}, a type of flower.",
+    "StanfordCars": "a photo of a {}, a type of car.",
+    "Caltech101": "a photo of a {}, an object.",
+    "StanfordDogs": "a photo of a {}, a breed of dog.",
+    "PLTNetMini": "a photo of a {}, a type of plant.",
+    "Bird525": "a photo of a {}, a type of bird.",
+}
 
 def load_results(backbone):
     filename = "results_zs_all_RN50.pkl" if backbone == "RN50" else "results_zs_all_ViT16.pkl"
-    with open(f"zs_results/{filename}", "rb") as f:
-        return pickle.load(f)
+    pickle_path = os.path.join("zs_results", filename)
+    if os.path.exists(pickle_path):
+        with open(pickle_path, "rb") as f:
+            return pickle.load(f)
+    else:
+        print(f"Warning: Pickle file not found at {pickle_path}. Returning empty dictionary.")
+        return {}
     
 
 def get_configs(args):
-    
-    # one class configurations
     onecls_configs = {
-            'RN50':{
+        'RN50':{
             'StanfordCars': {'lamb_preserve': 0.4, 'lamb_forget': 1.3, 'lora_r': 5, 'lamb_weight': 1.},
             'StanfordDogs': {'lamb_preserve': 0.4, 'lamb_forget': 1.3, 'lora_r': 5, 'lamb_weight': 1.},
             'Caltech101': {'lamb_preserve': 0.4, 'lamb_forget': 1.3, 'lora_r': 5, 'lamb_weight': 1.},
             'OxfordFlowers': {'lamb_preserve': 0.4, 'lamb_forget': 1.3, 'lora_r': 5, 'lamb_weight': 1.},
-            },
-            'ViT-B/16': {
-                'StanfordCars': {'lamb_preserve': 0.25, 'lamb_forget': 1.3, 'lora_r': 5, 'lamb_weight': 1.},
-                'StanfordDogs': {'lamb_preserve': 0.3, 'lamb_forget': 1.3, 'lora_r': 5, 'lamb_weight': 1.},
-                'Caltech101': {'lamb_preserve': 0.3, 'lamb_forget': 1.1, 'lora_r': 5, 'lamb_weight': 1.},
-                'OxfordFlowers': {'lamb_preserve': 0.3, 'lamb_forget': 1.1, 'lora_r': 5, 'lamb_weight': 1.}
-            }
-
+            'PLTNetMini': {'lamb_preserve': 0.4, 'lamb_forget': 1.3, 'lora_r': 5, 'lamb_weight': 1.},
+            'Bird525': {'lamb_preserve': 0.4, 'lamb_forget': 1.3, 'lora_r': 5, 'lamb_weight': 1.},
+        },
+        'ViT-B/16': {
+            'StanfordCars': {'lamb_preserve': 0.25, 'lamb_forget': 1.3, 'lora_r': 5, 'lamb_weight': 1.},
+            'StanfordDogs': {'lamb_preserve': 0.3, 'lamb_forget': 1.3, 'lora_r': 5, 'lamb_weight': 1.},
+            'Caltech101': {'lamb_preserve': 0.3, 'lamb_forget': 1.1, 'lora_r': 5, 'lamb_weight': 1.},
+            'OxfordFlowers': {'lamb_preserve': 0.3, 'lamb_forget': 1.1, 'lora_r': 5, 'lamb_weight': 1.},
+            'PLTNetMini': {'lamb_preserve': 0.3, 'lamb_forget': 1.1, 'lora_r': 5, 'lamb_weight': 1.},
+            'Bird525': {'lamb_preserve': 0.0, 'lamb_forget': 1.1, 'lora_r': 5, 'lamb_weight': 0.0}
+        }
     }
-    
-    # Multiclass configurations
     multiclass_configs = {
         'RN50': {
             'StanfordCars': {'lamb_preserve': 0.3, 'lamb_forget': 1.1, 'lora_r': 5, 'lamb_weight': 1.},
             'StanfordDogs': {'lamb_preserve': 0.3, 'lamb_forget': 1.1, 'lora_r': 5, 'lamb_weight': 1.},
             'Caltech101': {'lamb_preserve': 0.3, 'lamb_forget': 1.1, 'lora_r': 5, 'lamb_weight': 1.},
             'OxfordFlowers': {'lamb_preserve': 0.3, 'lamb_forget': 1.1, 'lora_r': 5, 'lamb_weight': 1.},
+            'PLTNetMini': {'lamb_preserve': 0.3, 'lamb_forget': 1.1, 'lora_r': 5, 'lamb_weight': 1.},
+            'Bird525': {'lamb_preserve': 0.3, 'lamb_forget': 1.1, 'lora_r': 5, 'lamb_weight': 1.},
         },
         'ViT-B/16': {
             'StanfordCars': {'lamb_preserve': 0.35, 'lamb_forget': 1.1, 'lora_r': 5, 'lamb_weight': 1.},
             'StanfordDogs': {'lamb_preserve': 0.35, 'lamb_forget': 1.0, 'lora_r': 5, 'lamb_weight': 1.},
             'Caltech101': {'lamb_preserve': 0.3, 'lamb_forget': 1.1, 'lora_r': 5, 'lamb_weight': 1.},
             'OxfordFlowers': {'lamb_preserve': 0.25, 'lamb_forget': 1.1, 'lora_r': 5, 'lamb_weight': 1.},
+            'PLTNetMini': {'lamb_preserve': 0.25, 'lamb_forget': 1.1, 'lora_r': 8, 'lamb_weight': 1.},
+            'Bird525': {'lamb_preserve': 0.25, 'lamb_forget': 1.1, 'lora_r': 5, 'lamb_weight': 1.},
         }
     }
 
@@ -82,7 +104,7 @@ def eval_all_ds(model, datasets_cls, forget_ds, forget_lbl, all_loaders, train_l
             cls_acc_test = None
             no_cls_acc = None
             if debug:
-                acc, (labels, clip_logits_test) = evaluate_clip_zs(model, test_loader, clip_weights, device=device, out_conf=True)
+                acc, (labels, clip_logits_test, raw_similarity) = evaluate_clip_zs(model, test_loader, clip_weights, device=device, out_conf=True)
                 # print("acc", acc)
                 if ignore_labels_main:
                     ignore_labels = []
@@ -141,25 +163,6 @@ def eval_all_ds(model, datasets_cls, forget_ds, forget_lbl, all_loaders, train_l
     return results
 
         
-def clip_classifier(classnames, template, clip_model):
-    with torch.no_grad():
-        clip_weights = []
-
-        for classname in classnames:
-            # Tokenize the prompts
-            classname = classname.replace('_', ' ')
-            texts = [t.format(classname) for t in template]
-            texts = clip.tokenize(texts).to(clip_model.visual.conv1.weight.device)
-            # prompt ensemble for ImageNet
-            class_embeddings = clip_model.encode_text(texts)
-            class_embeddings /= class_embeddings.norm(dim=-1, keepdim=True)
-            class_embedding = class_embeddings.mean(dim=0)
-            class_embedding /= class_embedding.norm()
-            clip_weights.append(class_embedding)
-
-        clip_weights = torch.stack(clip_weights, dim=1)#.cuda()
-    return clip_weights
-
 def get_model(arch="RN50", device='cpu', load_path="", lr=5e-5):
     url = clip._MODELS[arch]
     model_path = clip._download(url)
@@ -176,58 +179,41 @@ def get_model(arch="RN50", device='cpu', load_path="", lr=5e-5):
     if load_path:
         print(f"LOADING FROM {load_path}")
         model.load_state_dict(torch.load(load_path, map_location="cpu"))
-        classnames = datasets_cls[ds].classname
+    
+    return model
 
 def cls_acc(output, target, topk=1):
-    # Get the topk predictions
-    # pred = np.argsort(output, axis=1)[:, -topk:][:, ::-1].T
     pred = np.argmax(output, axis=1)
-    
-    # Check if predictions match the target
-    correct = pred == target.reshape(1, -1)
-    
-    # Calculate accuracy
-    acc = correct[:topk].reshape(-1).sum(0)
-    acc = 100 * acc / target.shape[0]
-    
+    correct = pred == target
+    acc = 100 * correct.sum() / target.shape[0]
     return acc
 
 def evaluate_clip_zs(model, loader, clip_weights, device=None, out_conf=False, output_probs=False):
     model.eval()
-    features = []
-    labels = []
+    features, labels = [], []
     with torch.no_grad():
-        for i, batch in enumerate(tqdm(loader)):    
-            images = batch['img']
-            target = batch['label']
-
-            images, target = images.to(device), target.to(device)
-            # image_features, image_features_projected = mymodel.encode_image(images)
-            image_features = model.encode_image(images)
+        for i, batch in enumerate(tqdm(loader, desc="Evaluating")):
+            images, target = batch['img'].to(device), batch['label'].to(device)
+            image_features = model.encode_image(images.to(next(model.parameters()).dtype))
             image_features /= image_features.norm(dim=-1, keepdim=True)
-
             features.append(image_features.cpu())
-            labels.append(target.cpu()) 
-            
-    labels = torch.cat(labels)
-    features = torch.cat(features)
-    
-    clip_logits_test = 100. * features @ clip_weights.detach().cpu().numpy()
-    acc = cls_acc(clip_logits_test.detach().cpu().numpy(), labels.detach().cpu().numpy())
-    acc = acc / 100.
-    
-    if output_probs:
-        probs = torch.nn.functional.softmax(clip_logits_test, dim=-1)
-    
-    if out_conf:
-        if output_probs:
-            return acc, (labels, clip_logits_test), probs
-            
-        return acc, (labels, clip_logits_test)
-    
-    if output_probs:
-        return acc, probs
+            labels.append(target.cpu())
 
+    labels, features = torch.cat(labels).numpy(), torch.cat(features)
+    clip_weights_tensor = clip_weights.detach().cpu()
+    if clip_weights_tensor.shape[0] != features.shape[1]:
+        clip_weights_tensor = clip_weights_tensor.T
+    
+    features_float, clip_weights_float = features.float(), clip_weights_tensor.float()
+    raw_similarity_tensor = features_float @ clip_weights_float
+    scaled_logits_tensor = 100. * raw_similarity_tensor
+    clip_logits_test = scaled_logits_tensor.numpy()
+    
+    acc = cls_acc(clip_logits_test, labels) / 100.
+
+    if out_conf:
+        raw_similarity = raw_similarity_tensor.numpy()
+        return acc, (labels, clip_logits_test, raw_similarity)
     return acc
 
 def acc_certain_cls(acc_all, all_lbls, ids_lbl):
@@ -331,3 +317,217 @@ def compute_avg_gain(df):
     # divide by 5 as we have 4 datasets + forget_perc (we have 6 elements below but in each row one element is 0 as it's NA)
     scores = (forget_perc + list_main_perc + forget_perc_scars + forget_perc_caltech + forget_perc_oxflow + forget_perc_sdogs)/5
     return scores.astype(float)
+
+
+def safe_swanlab_log(data):
+    """安全的SwanLab日志记录函数"""
+    global _swanlab_initialized
+    if _swanlab_initialized:
+        try:
+            swanlab.log(data)
+        except Exception as e:
+            print(f"⚠️ SwanLab logging error: {e}")
+
+def initialize_swanlab(project_name, experiment_name, config_dict):
+    """初始化SwanLab实验跟踪"""
+    global _swanlab_initialized
+    if not _swanlab_initialized:
+        try:
+            swanlab.init(
+                project=project_name,
+                experiment_name=experiment_name,
+                config=config_dict
+            )
+            _swanlab_initialized = True
+            return True
+        except Exception as e:
+            print(f"⚠️ SwanLab initialization error: {e}")
+            print("Continuing without SwanLab tracking...")
+            return False
+    else:
+        print("📊 SwanLab already initialized, skipping...")
+        return True
+
+def finish_swanlab():
+    """安全结束SwanLab实验"""
+    global _swanlab_initialized
+    if _swanlab_initialized:
+        try:
+            swanlab.finish()
+            print("📊 SwanLab experiment saved successfully!")
+        except Exception as e:
+            print(f"⚠️ SwanLab finish error: {e}")
+    else:
+        print("📊 SwanLab was not initialized, skipping finish.")
+
+def plot_forget_loss_curve(forget_loss_history, trial_num, task_name, save_dir="assets/plots"):
+    """
+    绘制遗忘损失曲线
+    
+    Args:
+        forget_loss_history: 遗忘损失历史列表
+        trial_num: 试验编号
+        task_name: 任务名称
+        save_dir: 保存目录
+    """
+    os.makedirs(save_dir, exist_ok=True)
+    
+    plt.figure(figsize=(10, 6))
+    epochs = list(range(1, len(forget_loss_history) + 1))
+    plt.plot(epochs, forget_loss_history, 'b-', linewidth=2, label='Forget Loss')
+    
+    # 添加关键点标记
+    if len(forget_loss_history) > 0:
+        min_idx = forget_loss_history.index(min(forget_loss_history))
+        plt.plot(min_idx + 1, forget_loss_history[min_idx], 'ro', markersize=8, label=f'Min Loss: {forget_loss_history[min_idx]:.4f}')
+    
+    plt.xlabel('Epoch')
+    plt.ylabel('Forget Loss')
+    plt.title(f'Forget Loss Curve - {task_name} (Trial {trial_num})')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    
+    # 保存图片
+    plot_path = os.path.join(save_dir, f"forget_loss_{task_name}_trial{trial_num}.png")
+    plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    return plot_path
+
+def plot_experiment_summary(all_logs, save_dir="assets/plots"):
+    """
+    绘制整个实验的汇总图表
+    
+    Args:
+        all_logs: 所有实验日志
+        save_dir: 保存目录
+    """
+    os.makedirs(save_dir, exist_ok=True)
+    
+    # 收集所有任务的相似度变化数据
+    tasks = []
+    forget_sim_before = []
+    forget_sim_after = []
+    preserved_sim_before = []
+    preserved_sim_after = []
+    
+    for dataset, dataset_logs in all_logs.items():
+        for forget_class, class_logs in dataset_logs.items():
+            if 'similarities_before_unlearn' in class_logs and 'similarities_after_unlearn' in class_logs:
+                task_name = f"{dataset}_{forget_class}"
+                tasks.append(task_name)
+                
+                sims_before = class_logs['similarities_before_unlearn']
+                sims_after = class_logs['similarities_after_unlearn']
+                
+                forget_sim_before.append(sims_before.get(forget_class, 0.0))
+                forget_sim_after.append(sims_after.get(forget_class, 0.0))
+                
+                # 计算保持类别的平均相似度
+                preserved_classes = [k for k in sims_before.keys() if k != forget_class]
+                if preserved_classes:
+                    preserved_sim_before.append(np.mean([sims_before.get(cls, 0.0) for cls in preserved_classes[:5]]))  # 取前5个保持类别
+                    preserved_sim_after.append(np.mean([sims_after.get(cls, 0.0) for cls in preserved_classes[:5]]))
+                else:
+                    preserved_sim_before.append(0.0)
+                    preserved_sim_after.append(0.0)
+    
+    if tasks:
+        # 创建相似度变化对比图
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+        
+        # 遗忘类别相似度变化
+        x_pos = np.arange(len(tasks))
+        ax1.bar(x_pos - 0.2, forget_sim_before, 0.4, label='Before Unlearning', alpha=0.7, color='red')
+        ax1.bar(x_pos + 0.2, forget_sim_after, 0.4, label='After Unlearning', alpha=0.7, color='blue')
+        ax1.set_xlabel('Tasks')
+        ax1.set_ylabel('Similarity')
+        ax1.set_title('Forget Class Similarity Change')
+        ax1.set_xticks(x_pos)
+        ax1.set_xticklabels(tasks, rotation=45, ha='right')
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+        
+        # 保持类别相似度变化
+        ax2.bar(x_pos - 0.2, preserved_sim_before, 0.4, label='Before Unlearning', alpha=0.7, color='green')
+        ax2.bar(x_pos + 0.2, preserved_sim_after, 0.4, label='After Unlearning', alpha=0.7, color='orange')
+        ax2.set_xlabel('Tasks')
+        ax2.set_ylabel('Similarity')
+        ax2.set_title('Preserved Classes Average Similarity')
+        ax2.set_xticks(x_pos)
+        ax2.set_xticklabels(tasks, rotation=45, ha='right')
+        ax2.legend()
+        ax2.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        summary_path = os.path.join(save_dir, "experiment_similarity_summary.png")
+        plt.savefig(summary_path, dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        print(f"Experiment summary plot saved to: {summary_path}")
+        return summary_path
+    
+    return None
+
+def convert_to_json_serializable(obj):
+    """将numpy数组和torch张量转换为JSON可序列化的格式"""
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, torch.Tensor):
+        return obj.cpu().numpy().tolist()
+    elif isinstance(obj, (np.float32, np.float64, np.int32, np.int64)):
+        return float(obj) if isinstance(obj, (np.float32, np.float64)) else int(obj)
+    elif isinstance(obj, dict):
+        return {key: convert_to_json_serializable(value) for key, value in obj.items()}
+    elif isinstance(obj, (list, tuple)):
+        return [convert_to_json_serializable(item) for item in obj]
+    else:
+        # 尝试转换其他numpy标量类型
+        if hasattr(obj, 'item'):  # numpy标量类型
+            return obj.item()
+        return obj
+
+@torch.no_grad()
+def calculate_average_class_similarity(model, loader, classnames, template, device):
+    """
+    Computes the average similarity between images of each class and their corresponding text description.
+    """
+    model.eval()
+    
+    all_image_features = []
+    all_labels = []
+    for batch in tqdm(loader, desc="Calculating similarities"):
+        images = batch['img'].to(device)
+        labels = batch['label'].to(device)
+        
+        image_features = model.encode_image(images.to(next(model.parameters()).dtype))
+        image_features /= image_features.norm(dim=-1, keepdim=True)
+        
+        all_image_features.append(image_features)
+        all_labels.append(labels)
+        
+    all_image_features = torch.cat(all_image_features)
+    all_labels = torch.cat(all_labels)
+    
+    text_features = clip_classifier(classnames, [template], model).to(device)
+    
+    if text_features.shape[0] != len(classnames):
+        print(Fore.YELLOW + "Transposing text features to match expected shape (num_classes, feature_dim)...")
+        text_features = text_features.T
+        
+    text_features /= text_features.norm(dim=-1, keepdim=True)
+    
+    avg_similarities = {}
+    for i, classname in enumerate(classnames):
+        class_mask = (all_labels == i)
+        if class_mask.sum() == 0:
+            continue
+            
+        class_image_features = all_image_features[class_mask]
+        
+        similarity_scores = class_image_features @ text_features[i]
+        
+        avg_similarities[classname] = similarity_scores.mean().item()
+        
+    return avg_similarities
+

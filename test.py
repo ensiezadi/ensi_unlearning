@@ -3,18 +3,31 @@ import sys
 import numpy as np
 import json
 import random
-import swanlab
-from datetime import datetime
 from tqdm import tqdm
 import torch
 import pickle
 import argparse
-from colorama import Fore, init
+from collections import OrderedDict
+from colorama import Fore, Style, init
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
-# Global flag to prevent multiple SwanLab initializations
-_swanlab_initialized = False
-
+def convert_to_json_serializable(obj):
+    """将numpy数组和torch张量转换为JSON可序列化的格式"""
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, torch.Tensor):
+        return obj.cpu().numpy().tolist()
+    elif isinstance(obj, (np.float32, np.float64, np.int32, np.int64)):
+        return float(obj) if isinstance(obj, (np.float32, np.float64)) else int(obj)
+    elif isinstance(obj, dict):
+        return {key: convert_to_json_serializable(value) for key, value in obj.items()}
+    elif isinstance(obj, (list, tuple)):
+        return [convert_to_json_serializable(item) for item in obj]
+    else:
+        # 尝试转换其他numpy标量类型
+        if hasattr(obj, 'item'):  # numpy标量类型
+            return obj.item()
+        return obj
 
 # 添加Dassl.pytorch到Python路径
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -22,24 +35,21 @@ dassl_path = os.path.join(current_dir, 'Dassl.pytorch')
 if dassl_path not in sys.path:
     sys.path.insert(0, dassl_path)
 
-# --- Additional Imports ---
+# --- Imports from utils_bioclip ---
 from sklearn.metrics import confusion_matrix
+import pandas as pd
+from torchvision.transforms import Normalize
 
 init(autoreset=True)
 
 # --- Project-specific Imports ---
 from dassl.data.datasets.build import build_dataset
+from dassl.data.transforms.transforms import build_transform
 from dassl.data.data_manager import build_data_loader
 from dassl.config import get_cfg_default
 
 from bioclip_adapter_fixed import bioclip_tokenize, create_bioclip_model, BioCLIPAdapter, clip_classifier
 from utils_lora import Linear
-from utils import *
-
-def get_model(arch="ViT-B/16", device='cpu', load_path=""):
-    print("Loading model...")
-    model = create_bioclip_model(arch=arch, device=device)
-    return model
 from gen_classes import *
 from forget_cls import *
 
@@ -49,6 +59,8 @@ import datasets
 # --- Global Configurations ---
 torch.set_num_threads(10)
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
+IGNORE_OTHER_DS = False
+PRINT_EVERY = 200
 EPOCHS = 2000
 REDUCTION_THR = 0.7
 UNLEARN_TRIALS = 100
@@ -61,6 +73,207 @@ CUSTOM_TEMPLATES = {
     "PLTNetMini": "a photo of a {}, a type of plant.",
     "Bird525": "a photo of a {}, a type of bird.",
 }
+
+
+# =================================================================================
+# --- Utility Functions ---
+# =================================================================================
+
+def load_results(backbone):
+    filename = "results_zs_all_RN50.pkl" if backbone == "RN50" else "results_zs_all_ViT16.pkl"
+    pickle_path = os.path.join("zs_results", filename)
+    if os.path.exists(pickle_path):
+        with open(pickle_path, "rb") as f:
+            return pickle.load(f)
+    else:
+        print(f"Warning: Pickle file not found at {pickle_path}. Returning empty dictionary.")
+        return {}
+
+def get_configs(args):
+    onecls_configs = {
+        'RN50':{
+            'StanfordCars': {'lamb_preserve': 0.4, 'lamb_forget': 1.3, 'lora_r': 5, 'lamb_weight': 1.},
+            'StanfordDogs': {'lamb_preserve': 0.4, 'lamb_forget': 1.3, 'lora_r': 5, 'lamb_weight': 1.},
+            'Caltech101': {'lamb_preserve': 0.4, 'lamb_forget': 1.3, 'lora_r': 5, 'lamb_weight': 1.},
+            'OxfordFlowers': {'lamb_preserve': 0.4, 'lamb_forget': 1.3, 'lora_r': 5, 'lamb_weight': 1.},
+            'PLTNetMini': {'lamb_preserve': 0.4, 'lamb_forget': 1.3, 'lora_r': 5, 'lamb_weight': 1.},
+            'Bird525': {'lamb_preserve': 0.4, 'lamb_forget': 1.3, 'lora_r': 5, 'lamb_weight': 1.},
+        },
+        'ViT-B/16': {
+            'StanfordCars': {'lamb_preserve': 0.25, 'lamb_forget': 1.3, 'lora_r': 5, 'lamb_weight': 1.},
+            'StanfordDogs': {'lamb_preserve': 0.3, 'lamb_forget': 1.3, 'lora_r': 5, 'lamb_weight': 1.},
+            'Caltech101': {'lamb_preserve': 0.3, 'lamb_forget': 1.1, 'lora_r': 5, 'lamb_weight': 1.},
+            'OxfordFlowers': {'lamb_preserve': 0.3, 'lamb_forget': 1.1, 'lora_r': 5, 'lamb_weight': 1.},
+            'PLTNetMini': {'lamb_preserve': 0.3, 'lamb_forget': 1.1, 'lora_r': 5, 'lamb_weight': 1.},
+            'Bird525': {'lamb_preserve': 0.0, 'lamb_forget': 1.1, 'lora_r': 5, 'lamb_weight': 0.}
+        }
+    }
+    multiclass_configs = {
+        'RN50': {
+            'StanfordCars': {'lamb_preserve': 0.3, 'lamb_forget': 1.1, 'lora_r': 5, 'lamb_weight': 1.},
+            'StanfordDogs': {'lamb_preserve': 0.3, 'lamb_forget': 1.1, 'lora_r': 5, 'lamb_weight': 1.},
+            'Caltech101': {'lamb_preserve': 0.3, 'lamb_forget': 1.1, 'lora_r': 5, 'lamb_weight': 1.},
+            'OxfordFlowers': {'lamb_preserve': 0.3, 'lamb_forget': 1.1, 'lora_r': 5, 'lamb_weight': 1.},
+            'PLTNetMini': {'lamb_preserve': 0.3, 'lamb_forget': 1.1, 'lora_r': 5, 'lamb_weight': 1.},
+            'Bird525': {'lamb_preserve': 0.3, 'lamb_forget': 1.1, 'lora_r': 5, 'lamb_weight': 1.},
+        },
+        'ViT-B/16': {
+            'StanfordCars': {'lamb_preserve': 0.35, 'lamb_forget': 1.1, 'lora_r': 5, 'lamb_weight': 1.},
+            'StanfordDogs': {'lamb_preserve': 0.35, 'lamb_forget': 1.0, 'lora_r': 5, 'lamb_weight': 1.},
+            'Caltech101': {'lamb_preserve': 0.3, 'lamb_forget': 1.1, 'lora_r': 5, 'lamb_weight': 1.},
+            'OxfordFlowers': {'lamb_preserve': 0.25, 'lamb_forget': 1.1, 'lora_r': 5, 'lamb_weight': 1.},
+            'PLTNetMini': {'lamb_preserve': 0.25, 'lamb_forget': 1.1, 'lora_r': 8, 'lamb_weight': 1.},
+            'Bird525': {'lamb_preserve': 0.25, 'lamb_forget': 1.1, 'lora_r': 5, 'lamb_weight': 1.},
+        }
+    }
+    if args.multiclass_forget:
+        print(f"SETTING {args.backbone_arch} MULTICLASS")
+        configs = multiclass_configs[args.backbone_arch]
+    else:
+        print(f"SETTING {args.backbone_arch} ONE CLASS")
+        configs = onecls_configs[args.backbone_arch]
+    return configs
+
+def get_model(arch="ViT-B/16", device='cpu', load_path=""):
+    print("Loading model...")
+    model = create_bioclip_model(arch=arch, device=device)
+    return model
+
+def cls_acc(output, target, topk=1):
+    pred = np.argmax(output, axis=1)
+    correct = pred == target
+    acc = 100 * correct.sum() / target.shape[0]
+    return acc
+
+@torch.no_grad()
+def calculate_average_class_similarity(model, loader, classnames, template, device):
+    """
+    Computes the average similarity between images of each class and their corresponding text description.
+    """
+    model.eval()
+    
+    all_image_features = []
+    all_labels = []
+    for batch in tqdm(loader, desc="Calculating similarities"):
+        images = batch['img'].to(device)
+        labels = batch['label'].to(device)
+        
+        image_features = model.encode_image(images.to(next(model.parameters()).dtype))
+        image_features /= image_features.norm(dim=-1, keepdim=True)
+        
+        all_image_features.append(image_features)
+        all_labels.append(labels)
+        
+    all_image_features = torch.cat(all_image_features)
+    all_labels = torch.cat(all_labels)
+    
+    text_features = clip_classifier(classnames, [template], model).to(device)
+    
+    if text_features.shape[0] != len(classnames):
+        print(Fore.YELLOW + "Transposing text features to match expected shape (num_classes, feature_dim)...")
+        text_features = text_features.T
+        
+    text_features /= text_features.norm(dim=-1, keepdim=True)
+    
+    avg_similarities = {}
+    for i, classname in enumerate(classnames):
+        class_mask = (all_labels == i)
+        if class_mask.sum() == 0:
+            continue
+            
+        class_image_features = all_image_features[class_mask]
+        
+        similarity_scores = class_image_features @ text_features[i]
+        
+        avg_similarities[classname] = similarity_scores.mean().item()
+        
+    return avg_similarities
+
+def evaluate_clip_zs(model, loader, clip_weights, device=None, out_conf=False, output_probs=False):
+    model.eval()
+    features, labels = [], []
+    with torch.no_grad():
+        for i, batch in enumerate(tqdm(loader, desc="Evaluating")):
+            images, target = batch['img'].to(device), batch['label'].to(device)
+            image_features = model.encode_image(images.to(next(model.parameters()).dtype))
+            image_features /= image_features.norm(dim=-1, keepdim=True)
+            features.append(image_features.cpu())
+            labels.append(target.cpu())
+
+    labels, features = torch.cat(labels).numpy(), torch.cat(features)
+    clip_weights_tensor = clip_weights.detach().cpu()
+    if clip_weights_tensor.shape[0] != features.shape[1]:
+        clip_weights_tensor = clip_weights_tensor.T
+    
+    features_float, clip_weights_float = features.float(), clip_weights_tensor.float()
+    raw_similarity_tensor = features_float @ clip_weights_float
+    scaled_logits_tensor = 100. * raw_similarity_tensor
+    clip_logits_test = scaled_logits_tensor.numpy()
+    
+    acc = cls_acc(clip_logits_test, labels) / 100.
+
+    if out_conf:
+        raw_similarity = raw_similarity_tensor.numpy()
+        return acc, (labels, clip_logits_test, raw_similarity)
+    return acc
+
+def eval_all_ds(model, datasets_cls, forget_ds, forget_lbl, all_loaders, train_loader=None, eval_forgetonly=False, debug=False, device='cpu', ignore_labels_main=[]):
+    results = {ds: {} for ds in all_loaders}
+    for ds, test_loader in all_loaders.items():
+        if ds not in datasets_cls: continue
+        model.eval()
+        classnames = datasets_cls[ds].classnames
+        template = [CUSTOM_TEMPLATES.get(ds, 'a photo of a {}.')]
+        clip_weights = clip_classifier(classnames, [template], model).to(device)
+
+        if ds == forget_ds:
+            if debug:
+                acc, details = evaluate_clip_zs(model, test_loader, clip_weights, device=device, out_conf=True)
+                labels, clip_logits_test, raw_similarities = details
+                
+                if ignore_labels_main:
+                    ignore_ids = [classnames.index(c) for c in ignore_labels_main if c in classnames]
+                    mask = ~np.isin(labels, ignore_ids)
+                else:
+                    forget_id = classnames.index(forget_lbl) if forget_lbl in classnames else -1
+                    mask = labels != forget_id
+                
+                cm = confusion_matrix(labels, clip_logits_test.argmax(1))
+                if not ignore_labels_main and forget_lbl in classnames:
+                    forget_id = classnames.index(forget_lbl)
+                    cls_acc_test = cm[forget_id, forget_id] / (cm[forget_id, :].sum() + 1e-8)
+                else:
+                    cls_acc_test = -1
+
+                # 计算保留类别的准确率 - 需要从混淆矩阵中排除忘记类别
+                if ignore_labels_main:
+                    ignore_ids = [classnames.index(c) for c in ignore_labels_main if c in classnames]
+                    preserved_class_ids = [i for i in range(len(classnames)) if i not in ignore_ids]
+                else:
+                    forget_id = classnames.index(forget_lbl) if forget_lbl in classnames else -1
+                    preserved_class_ids = [i for i in range(len(classnames)) if i != forget_id]
+                
+                if preserved_class_ids:
+                    preserved_cm = cm[np.ix_(preserved_class_ids, preserved_class_ids)]
+                    no_cls_acc = np.diag(preserved_cm).sum() / (preserved_cm.sum() + 1e-8)
+                else:
+                    no_cls_acc = -1
+
+                key = '|'.join(ignore_labels_main) if ignore_labels_main else forget_lbl
+                
+                results[ds][key] = {
+                    'cls_acc_test' : cls_acc_test, 
+                    'no_cls_acc' : no_cls_acc,
+                    'raw_similarities': raw_similarities
+                }
+                print(f"{10*'+++'} Main DS: {ds} | Results: {{'cls_acc_test': {cls_acc_test:.4f}, 'no_cls_acc': {no_cls_acc:.4f}}} {10*'+++'}")
+        
+        elif not eval_forgetonly:
+            acc = evaluate_clip_zs(model, test_loader, clip_weights, device=device)
+            results[ds]['all'] = {'all_ds' : acc}
+            print(f"{10*'+++'} Other DS: {ds} | Accuracy: {acc:.4f} {10*'+++'}")
+
+    return results
 
 # =================================================================================
 # --- Main Script Helper Functions ---
@@ -92,6 +305,9 @@ def load_test_datasets(cfg, model):
     import datasets.stanford_dogs
     import datasets.caltech101
     import datasets.oxford_flowers
+    import datasets.oxford_pets
+    import datasets.food101
+    # import datasets.pinsfaces
     import datasets.plt_net_mini
     import datasets.bird525
 
@@ -244,11 +460,10 @@ if __name__ == '__main__':
     parser.add_argument("--output_dir", type=str, default="results/result0", help="Output directory")
     parser.add_argument("--dataset_root", type=str, default="E:\\Others\\DATASETS", help="Root directory for all datasets")
     parser.add_argument("--seed", type=int, default=0, help="Random seed")
-    parser.add_argument("--run_ds", type=str, default="PLTNetMini", help="Comma-separated list of datasets to run unlearning on") # PLTNetMini Bird525
+    parser.add_argument("--run_ds", type=str, default="PLTNetMini", help="Comma-separated list of datasets to run unlearning on")
     parser.add_argument("--backbone_arch", type=str, default="ViT-B/16", help="CLIP backbone architecture")
     parser.add_argument("--config_file", type=str, default="configs/trainers/adam_lr2e-4_B256_ep200_ViT16.yaml", help="Path to dassl config file")
     parser.add_argument("--multiclass_forget", action='store_true', help="Enable multiclass forgetting")
-    parser.add_argument("--experiment_name", type=str, default="", help="Custom experiment name for SwanLab (if empty, auto-generated)")
     
     args = parser.parse_args()
     print("Arguments:", args)
@@ -258,34 +473,6 @@ if __name__ == '__main__':
     
     os.makedirs(args.output_dir, exist_ok=True)
     configs = get_configs(args)
-    
-    # 设置实验名称
-    if args.experiment_name:
-        experiment_name = args.experiment_name
-        print(f"📝 Using custom experiment name: {experiment_name}")
-    else:
-        # 自动生成带时间戳的实验名称
-        timestamp = datetime.now().strftime("%m%d_%H%M")
-        arch_short = args.backbone_arch.replace('/', '-').replace('ViT-B', 'VB')
-        experiment_name = f"{arch_short}_{args.run_ds}_{timestamp}"
-        print(f"🏷️ Auto-generated experiment name: {experiment_name}")
-    
-    # SwanLab实验跟踪 - 确保只初始化一次
-    swanlab_success = initialize_swanlab(
-        project_name="bioclip-forgetting",
-        experiment_name=experiment_name,
-        config_dict={
-            "backbone_arch": args.backbone_arch,
-            "run_ds": args.run_ds,
-            "seed": args.seed,
-            "epochs": EPOCHS,
-            "unlearn_trials": UNLEARN_TRIALS,
-            "reduction_threshold": REDUCTION_THR,
-            "custom_name": args.experiment_name if args.experiment_name else "auto"
-        }
-    )
-    if swanlab_success:
-        print(f"📊 SwanLab experiment initialized successfully!")
     
     all_logs = {}
     
@@ -338,10 +525,6 @@ if __name__ == '__main__':
             print(f"\n--- Forgetting class: {forget_label} ---\n")
             model.load_state_dict(original_model_state)
             
-            # 任务标识
-            task_name = f"{main_ds}_{forget_label}"
-            print(f"🎯 Starting unlearning task: {task_name}")
-            
             # Calculate and print similarities before unlearning
             print(Fore.CYAN + "--- Calculating Average Class Similarities (Before Unlearning) ---")
             sims_before = calculate_average_class_similarity(
@@ -356,11 +539,6 @@ if __name__ == '__main__':
             for preserved_cls in preserved_samples:
                 print(f"  - Similarity for preserved class '{preserved_cls}': {sims_before.get(preserved_cls, 'N/A'):.4f}")
             
-            # 记录初始相似度 - 简化版本
-            forget_sim_before = sims_before.get(forget_label, 0.0)
-            preserved_sim_before = np.mean([sims_before.get(cls, 0.0) for cls in preserved_samples])
-            print(f"📊 Initial similarities - Forget: {forget_sim_before:.4f}, Preserved: {preserved_sim_before:.4f}")
-            
             all_logs[main_ds][forget_label] = {'similarities_before_unlearn': sims_before}
 
             
@@ -370,10 +548,7 @@ if __name__ == '__main__':
 
             for ds_name, ds_hooks in all_hooks.items():
                 if ds_name == main_ds:
-                    # 统一使用gen_classes.py中的类别列表（包括动态获取的Bird525类别）
-                    class_lists = get_class_lists(datasets_cls)
-                    
-                    preserved_class_names = get_preserved_classes(main_ds, forget_label, args, class_lists)
+                    preserved_class_names = get_preserved_classes(main_ds, forget_label, args, {'PLTNetMini': pltnetmini_list, 'StanfordDogs': stanforddogs_list, 'StanfordCars': stanfordcars_list, 'Caltech101': caltech_list, 'OxfordFlowers': oxfordflowers_list, 'Bird525': bird525_list})
                     if preserved_class_names:
                         indices = [datasets_cls[ds_name].classnames.index(c) for c in preserved_class_names]
                         preserve_hooks_list.append(ds_hooks[indices])
@@ -435,15 +610,9 @@ if __name__ == '__main__':
 
                 print(f"Trial {trial+1}: Initial forget loss is {initial_forget_loss_for_trials:.4f}. Current lamb_forget={current_lambdas['forget']:.2f}, lamb_preserve={kwargs['lamb_preserve']:.2f}")
                 
-                # 显示试验信息
-                print(f"🚀 Trial {trial+1}/{UNLEARN_TRIALS}: Initial loss={initial_forget_loss_for_trials:.4f}, λ_forget={current_lambdas['forget']:.3f}")
-                
                 final_forget_loss = None
                 initial_lora_a = new_text_proj.lora_A.clone()
                 initial_lora_b = new_text_proj.lora_B.clone()
-                
-                # 用于记录每个epoch的遗忘损失
-                forget_loss_history = []
                 
                 for epoch in range(EPOCHS):
                     # 确保模块在训练模式
@@ -472,104 +641,83 @@ if __name__ == '__main__':
                     loss.backward()
                     optimizer.step()
                     scheduler.step()
-                    
-                    # 记录当前epoch的遗忘损失
-                    current_forget_loss = forget_loss_val.item()
-                    forget_loss_history.append(current_forget_loss)
-                    
-                    # 记录遗忘损失 - 简化版本
-                    if (epoch + 1) % 500 == 0:
-                        loss_reduction = (initial_forget_loss_for_trials - current_forget_loss) / initial_forget_loss_for_trials
-                        print(f"  Epoch {epoch+1}: Forget Loss={current_forget_loss:.4f}, Reduction={loss_reduction:.1%}")
-                        
-                        # 只记录核心指标，使用类别标签
-                        safe_swanlab_log({
-                            f"forget_loss_{forget_label}": current_forget_loss,
-                            f"total_loss_{forget_label}": loss.item(),
-                            f"loss_reduction_{forget_label}": loss_reduction
-                        })
 
                     # Periodic evaluation during training
-                    # if (epoch + 1) == EPOCHS:
-                    #     with torch.no_grad():
-                    #         # 正确合并LoRA权重，包括scaling因子
-                    #         current_delta_w = (new_text_proj.lora_B @ new_text_proj.lora_A) * new_text_proj.scaling
-                    #         current_weights_fp32 = (new_text_proj.weight.T + current_delta_w.T).clone()
-                    #         current_weights = current_weights_fp32.to(dtype=original_dtype)
+                    if (epoch + 1) % 1000 == 0 or (epoch + 1) == EPOCHS:
+                        with torch.no_grad():
+                            # 正确合并LoRA权重，包括scaling因子
+                            current_delta_w = (new_text_proj.lora_B @ new_text_proj.lora_A) * new_text_proj.scaling
+                            current_weights_fp32 = (new_text_proj.weight.T + current_delta_w.T).clone()
+                            current_weights = current_weights_fp32.to(dtype=original_dtype)
 
-                    #         # 暂存原始权重，评估后恢复
-                    #         original_text_projection = model.text_projection.clone()
-                    #         model.text_projection = torch.nn.Parameter(current_weights)
+                            # 暂存原始权重，评估后恢复
+                            original_text_projection = model.text_projection.clone()
+                            model.text_projection = torch.nn.Parameter(current_weights)
                             
-                    #         # 同时检查是否需要更新底层模型的text_projection
-                    #         if hasattr(model, 'model') and hasattr(model.model, 'text_projection'):
-                    #             original_underlying_projection = model.model.text_projection.clone()
-                    #             model.model.text_projection = torch.nn.Parameter(current_weights)
-                    #             print(f"  - Updated underlying model text_projection")
+                            # 同时检查是否需要更新底层模型的text_projection
+                            if hasattr(model, 'model') and hasattr(model.model, 'text_projection'):
+                                original_underlying_projection = model.model.text_projection.clone()
+                                model.model.text_projection = torch.nn.Parameter(current_weights)
+                                print(f"  - Updated underlying model text_projection")
                             
-                    #         model.eval()
+                            model.eval()
                             
-                    #         # 验证权重确实被更新
-                    #         updated_norm = torch.norm(model.text_projection).item()
-                    #         original_norm = torch.norm(original_text_projection).item()
-                    #         print(f"  - Weight update verification: {original_norm:.6f} -> {updated_norm:.6f}")
+                            # 验证权重确实被更新
+                            updated_norm = torch.norm(model.text_projection).item()
+                            original_norm = torch.norm(original_text_projection).item()
+                            print(f"  - Weight update verification: {original_norm:.6f} -> {updated_norm:.6f}")
 
-                    #     print(Fore.MAGENTA + f"\n--- Calculating Intermediate Similarities at Epoch {epoch+1} ---")
-                    #     sims_epoch = calculate_average_class_similarity(
-                    #         model,
-                    #         test_dataloaders[main_ds],
-                    #         datasets_cls[main_ds].classnames,
-                    #         CUSTOM_TEMPLATES.get(main_ds, 'a photo of a {}.'),
-                    #         device
-                    #     )
+                        print(Fore.MAGENTA + f"\n--- Calculating Intermediate Similarities at Epoch {epoch+1} ---")
+                        sims_epoch = calculate_average_class_similarity(
+                            model,
+                            test_dataloaders[main_ds],
+                            datasets_cls[main_ds].classnames,
+                            CUSTOM_TEMPLATES.get(main_ds, 'a photo of a {}.'),
+                            device
+                        )
 
-                    #     forget_sim_start = sims_before.get(forget_label, float('nan'))
-                    #     forget_sim_current = sims_epoch.get(forget_label, float('nan'))
-                    #     print(f"  - Forget Class '{forget_label}': {forget_sim_current:.4f} (Start: {forget_sim_start:.4f})")
-                    #     print(f"  - Delta magnitude: {torch.norm(current_delta_w).item():.6f}")
+                        forget_sim_start = sims_before.get(forget_label, float('nan'))
+                        forget_sim_current = sims_epoch.get(forget_label, float('nan'))
+                        print(f"  - Forget Class '{forget_label}': {forget_sim_current:.4f} (Start: {forget_sim_start:.4f})")
+                        print(f"  - Delta magnitude: {torch.norm(current_delta_w).item():.6f}")
                         
-                    #     # 简化的中间评估记录
-                    #     preserved_sims_current = [sims_epoch.get(cls, 0.0) for cls in preserved_samples]
-                    #     avg_preserved_sim = np.mean(preserved_sims_current)
-                    #     print(f"  - Epoch {epoch+1} Similarities: Forget={forget_sim_current:.4f}, Preserved={avg_preserved_sim:.4f}")
+                        # 调试：检查ln_final的输出是否发生变化
+                        with torch.no_grad():
+                            # 获取遗忘类别的当前ln输出
+                            forget_class_name_clean = forget_label.replace('_', ' ')
+                            test_text = bioclip_tokenize([f"a photo of a {forget_class_name_clean}, a type of plant."]).to(device)
+                            
+                            # 清除之前的hooks
+                            hooks.clear()
+                            
+                            # 通过模型获取文本特征，这会触发hooks
+                            text_features = model.encode_text(test_text)
+                            
+                            # 检查ln_final的输出
+                            if 'ln_final' in hooks:
+                                current_ln_output = hooks['ln_final'].mean().item()
+                                print(f"  - Current ln_final output mean: {current_ln_output:.6f}")
+                            
+                            # 检查text_projection权重的变化
+                            current_text_proj_norm = torch.norm(model.text_projection).item()
+                            print(f"  - Text projection norm: {current_text_proj_norm:.6f}")
                         
-                    #     # 调试：检查ln_final的输出是否发生变化
-                    #     with torch.no_grad():
-                    #         # 获取遗忘类别的当前ln输出
-                    #         forget_class_name_clean = forget_label.replace('_', ' ')
-                    #         test_text = bioclip_tokenize([f"a photo of a {forget_class_name_clean}, a type of plant."]).to(device)
-                            
-                    #         # 清除之前的hooks
-                    #         hooks.clear()
-                            
-                    #         # 通过模型获取文本特征，这会触发hooks
-                    #         text_features = model.encode_text(test_text)
-                            
-                    #         # 检查ln_final的输出
-                    #         if 'ln_final' in hooks:
-                    #             current_ln_output = hooks['ln_final'].mean().item()
-                    #             print(f"  - Current ln_final output mean: {current_ln_output:.6f}")
-                            
-                    #         # 检查text_projection权重的变化
-                    #         current_text_proj_norm = torch.norm(model.text_projection).item()
-                    #         print(f"  - Text projection norm: {current_text_proj_norm:.6f}")
-                        
-                    #     # 另外，检查原始的change_hooks和当前处理后的输出差异
-                    #     with torch.no_grad():
-                    #         original_output = new_text_proj.weight.T @ change_hooks.T
-                    #         current_output_with_lora = new_text_proj(change_hooks)
-                    #         lora_effect = torch.norm(current_output_with_lora - original_output.T).item()
-                    #         print(f"  - LoRA effect on change_hooks: {lora_effect:.6f}")
+                        # 另外，检查原始的change_hooks和当前处理后的输出差异
+                        with torch.no_grad():
+                            original_output = new_text_proj.weight.T @ change_hooks.T
+                            current_output_with_lora = new_text_proj(change_hooks)
+                            lora_effect = torch.norm(current_output_with_lora - original_output.T).item()
+                            print(f"  - LoRA effect on change_hooks: {lora_effect:.6f}")
 
-                    #     log_key = 'epoch_similarities'
-                    #     if log_key not in all_logs[main_ds][forget_label]:
-                    #         all_logs[main_ds][forget_label][log_key] = {}
-                    #     all_logs[main_ds][forget_label][log_key][epoch + 1] = sims_epoch
+                        log_key = 'epoch_similarities'
+                        if log_key not in all_logs[main_ds][forget_label]:
+                            all_logs[main_ds][forget_label][log_key] = {}
+                        all_logs[main_ds][forget_label][log_key][epoch + 1] = sims_epoch
                         
-                    #     # 恢复原始权重，让LoRA训练继续
-                    #     model.text_projection = torch.nn.Parameter(original_text_projection)
-                    #     if hasattr(model, 'model') and hasattr(model.model, 'text_projection'):
-                    #         model.model.text_projection = torch.nn.Parameter(original_underlying_projection)
+                        # 恢复原始权重，让LoRA训练继续
+                        model.text_projection = torch.nn.Parameter(original_text_projection)
+                        if hasattr(model, 'model') and hasattr(model.model, 'text_projection'):
+                            model.model.text_projection = torch.nn.Parameter(original_underlying_projection)
 
                 # 保存最终的遗忘损失
                 final_forget_loss = forget_loss_val.item()
@@ -584,22 +732,6 @@ if __name__ == '__main__':
                     
                     print(f"Trial {trial+1} Summary: Initial Loss={initial_forget_loss_for_trials:.4f}, Final Loss={final_forget_loss:.4f}, Reduction={reduction:.2%}")
                     
-                    # 计算遗忘损失统计
-                    min_forget_loss = min(forget_loss_history)
-                    max_forget_loss = max(forget_loss_history)
-                    avg_forget_loss = sum(forget_loss_history) / len(forget_loss_history)
-                    
-                    # 记录核心结果
-                    success = reduction >= REDUCTION_THR
-                    print(f"✅ Trial {trial+1} Results: Reduction={reduction:.1%}, Success={success}")
-                    
-                    # 只记录最重要的指标到SwanLab，使用类别标签
-                    safe_swanlab_log({
-                        f"trial_success_{forget_label}": 1.0 if success else 0.0,
-                        f"final_reduction_{forget_label}": reduction,
-                        f"successful_trial_number_{forget_label}": trial + 1 if success else 0
-                    })
-                    
                     if reduction >= REDUCTION_THR:
                         print(Fore.GREEN + "Unlearning successful, breaking trial loop.")
                         # 正确合并LoRA权重，包括scaling因子
@@ -607,16 +739,6 @@ if __name__ == '__main__':
                         final_weights_fp32 = (new_text_proj.weight.T + delta_w.T).clone()
                         best_weights = final_weights_fp32.to(dtype=original_dtype)
                         print(f"Applied LoRA delta with scaling {new_text_proj.scaling:.4f}")
-                        
-                        # 生成遗忘损失曲线图
-                        try:
-                            plot_path = plot_forget_loss_curve(forget_loss_history, trial + 1, task_name)
-                            print(f"Forget loss curve saved to: {plot_path}")
-                        except Exception as e:
-                            print(f"Warning: Could not save forget loss curve: {e}")
-                        
-                        # 记录成功信息
-                        print(f"🎉 Success! Trial {trial+1} completed in {len(forget_loss_history)} epochs")
                         break
                     else:
                         best_weights = None
@@ -625,14 +747,6 @@ if __name__ == '__main__':
                             print(f"Reduction insufficient. Increasing lamb_forget aggressively to {current_lambdas['forget']:.2f} for the next trial.")
                         else:
                             print(Fore.RED + "All trials failed to meet the reduction threshold.")
-                            # 为失败的试验也保存损失曲线用于分析
-                            try:
-                                plot_path = plot_forget_loss_curve(forget_loss_history, trial + 1, f"{task_name}_FAILED")
-                                print(f"Failed trial forget loss curve saved to: {plot_path}")
-                            except Exception as e:
-                                print(f"Warning: Could not save failed trial curve: {e}")
-                            # 记录失败
-                            print(f"❌ All trials failed for {task_name}")
 
             if best_weights is not None:
                 # 保存更新前的权重，用于验证
@@ -664,58 +778,17 @@ if __name__ == '__main__':
                 for preserved_cls in preserved_samples:
                     print(f"  - Similarity for preserved class '{preserved_cls}': {sims_after.get(preserved_cls, 'N/A'):.4f} (Before: {sims_before.get(preserved_cls, 'N/A'):.4f})")
                 
-                # 计算相似度变化
-                forget_sim_after = sims_after.get(forget_label, 0.0)
-                preserved_sims_after = [sims_after.get(cls, 0.0) for cls in preserved_samples]
-                forget_sim_change = forget_sim_after - forget_sim_before
-                preserved_sim_change = np.mean(preserved_sims_after) - preserved_sim_before
-                
-                print(f"📈 Final changes - Forget: {forget_sim_change:+.4f}, Preserved: {preserved_sim_change:+.4f}")
-                
-                # 记录核心结果到SwanLab
-                safe_swanlab_log({
-                    f"forget_similarity_change_{forget_label}": forget_sim_change,
-                    f"preserved_similarity_change_{forget_label}": preserved_sim_change,
-                    f"task_completed_{forget_label}": 1.0
-                })
-                
                 all_logs[main_ds][forget_label]['similarities_after_unlearn'] = sims_after
                 
                 results_ds = eval_all_ds(model, datasets_cls, main_ds, forget_label, test_dataloaders,
                                          None, eval_forgetonly=False, debug=True, device=device)
                 
                 all_logs[main_ds][forget_label]['final_results'] = results_ds
-                print(f"*** Final results for forgetting '{forget_label}': ***")
-                
-                # 显示最终评估结果
-                final_result = results_ds[main_ds].get(forget_label, {})
-                if final_result:
-                    cls_acc = final_result.get('cls_acc_test', 0.0)
-                    no_cls_acc = final_result.get('no_cls_acc', 0.0)
-                    per_class_acc = final_result.get('per_class_accuracy', {})
-                    
-                    print(f"📊 SUMMARY - Forget class: {cls_acc:.4f}, Preserved classes: {no_cls_acc:.4f}")
-                    
-                    # 显示详细的每类别结果
-                    if per_class_acc:
-                        print(f"\n🎯 DETAILED RESULTS FOR {main_ds}:")
-                        print(f"  🔴 Forget class '{forget_label}': {per_class_acc.get(forget_label, 'N/A'):.4f}")
-                        print(f"  🟢 Preserved classes:")
-                        for class_name, acc in per_class_acc.items():
-                            if class_name != forget_label:
-                                print(f"    {class_name}: {acc:.4f}")
-                    
-                    # 记录最终指标
-                    safe_swanlab_log({
-                        f"final_forget_accuracy_{forget_label}": cls_acc,
-                        f"final_preserved_accuracy_{forget_label}": no_cls_acc
-                    })
+                print(f"*** Final results for forgetting '{forget_label}': {results_ds[main_ds].get(forget_label, 'N/A')} ***")
 
                 model_save_path = os.path.join(output_base, f"model_{main_ds}_{forget_label}.pth")
                 print(Fore.GREEN + f"Saving unlearned model to {model_save_path}...")
                 torch.save(model.state_dict(), model_save_path)
-                
-                print(f"💾 Model saved: {model_save_path}")
                 
                 # 转换为JSON可序列化格式并保存
                 serializable_logs = convert_to_json_serializable(all_logs)
@@ -725,23 +798,7 @@ if __name__ == '__main__':
                 print(f"Error: Could not find suitable weights for forgetting '{forget_label}'.")
 
     print("\nAll tasks completed.")
-    
-    # 生成实验汇总图表
-    try:
-        summary_plot_path = plot_experiment_summary(all_logs)
-        if summary_plot_path:
-            print(f"📈 Summary plot saved: {summary_plot_path}")
-    except Exception as e:
-        print(f"Warning: Could not generate experiment summary plot: {e}")
-    
-    # 记录实验完成
-    total_classes = sum(len(forget_classes_all.get(ds, [])) if isinstance(forget_classes_all.get(ds, []), list) else 1 for ds in run_ds)
-    print(f"🎉 Experiment completed! Processed {total_classes} classes from {len(run_ds)} datasets")
-    
     # 转换为JSON可序列化格式并保存最终日志
     serializable_logs = convert_to_json_serializable(all_logs)
     with open(os.path.join(output_base, "logs.json"), "w") as f:
         json.dump(serializable_logs, f, indent=4)
-    
-    # 结束SwanLab实验
-    finish_swanlab()

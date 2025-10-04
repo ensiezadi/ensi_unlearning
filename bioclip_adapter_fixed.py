@@ -189,12 +189,20 @@ def create_bioclip_model(arch="ViT-B-16", device='cuda', load_path=""):
             raise clip_e
 
 
+# Global tokenizer cache to avoid repeated downloads
+_BIOCLIP_TOKENIZER = None
+
 def bioclip_tokenize(texts: Union[str, List[str]], context_length: int = 77):
     """Tokenize text using BioCLIP tokenizer with fallback to CLIP"""
+    global _BIOCLIP_TOKENIZER
     try:
         import open_clip
-        # Try to get BioCLIP tokenizer
-        tokenizer = open_clip.get_tokenizer('hf-hub:imageomics/bioclip')
+        # Use cached tokenizer or create new one
+        if _BIOCLIP_TOKENIZER is None:
+            print("Initializing BioCLIP tokenizer (first time only)...")
+            _BIOCLIP_TOKENIZER = open_clip.get_tokenizer('hf-hub:imageomics/bioclip')
+        
+        tokenizer = _BIOCLIP_TOKENIZER
         
         # BioCLIP typically uses context_length=77, ensure consistency
         if isinstance(texts, str):

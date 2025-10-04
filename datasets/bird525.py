@@ -141,15 +141,39 @@ class Bird525(DatasetBase):
                 # 构建完整的图像绝对路径
                 full_impath = os.path.join(self.image_dir, relative_impath)
                 
-                if os.path.exists(full_impath):
-                    item = Datum(
-                        impath=full_impath,
-                        label=class_to_idx[classname],
-                        classname=classname
-                    )
-                    target_list.append(item)
-                else:
-                    print(f"Warning: Image not found: {full_impath}")
+                # 如果路径不存在，尝试修复常见的拼写错误
+                if not os.path.exists(full_impath):
+                    # 尝试修复已知的拼写错误
+                    corrected_path = relative_impath
+                    
+                    # 修复PARAKETT  AKULET -> PARAKETT  AUKLET (双空格+AKULET -> 双空格+AUKLET)  
+                    corrected_path = corrected_path.replace('PARAKETT  AKULET', 'PARAKETT  AUKLET')
+                    
+                    # 特殊修复：valid分割中PARAKETT  AUKLET (双空格) -> PARAKETT AUKLET (单空格)
+                    if 'valid/' in corrected_path:
+                        corrected_path = corrected_path.replace('PARAKETT  AUKLET', 'PARAKETT AUKLET')
+                    
+                    # 可以在这里添加更多的拼写错误修复规则
+                    # corrected_path = corrected_path.replace('OTHER_TYPO', 'CORRECT_NAME')
+                    
+                    if corrected_path != relative_impath:
+                        full_impath = os.path.join(self.image_dir, corrected_path)
+                        if os.path.exists(full_impath):
+                            # print(f"✅ Path corrected: {relative_impath} -> {corrected_path}")
+                            continue
+                        else:
+                            print(f"Warning: Image not found even after path correction: {full_impath}")
+                            continue
+                    else:
+                        print(f"Warning: Image not found: {full_impath}")
+                        continue
+                
+                item = Datum(
+                    impath=full_impath,
+                    label=class_to_idx[classname],
+                    classname=classname
+                )
+                target_list.append(item)
 
         # 分别填充 train, valid, 和 test 列表
         populate_split('train', train_data)
